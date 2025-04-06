@@ -1,29 +1,32 @@
 import sys
+import os
 import socket
-import json
-from src.server.network_server import NetworkServer
-from src.server.motor_controller import MotorController
+
+def get_local_ip():
+    """Get the local machine's IP address that would be used to connect to internet"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Doesn't need to be reachable, just used to get local interface IP
+        s.connect(('8.8.8.8', 1))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except:
+        return '127.0.0.1'
 
 def main():
-    # Load server configuration
-    with open('config/server_config.json') as config_file:
-        config = json.load(config_file)
-
-    server_ip = config.get('server_ip', '0.0.0.0')
-    server_port = config.get('server_port', 8080)
-
-    # Initialize motor controller
-    motor_controller = MotorController()
-
-    # Start the network server
-    server = NetworkServer(server_ip, server_port, motor_controller)
+    # Add root directory to path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        print("Server is shutting down.")
-        server.stop()
-        sys.exit(0)
+    # Get local IP to suggest
+    local_ip = get_local_ip()
+    
+    print("===== ROV Server Launcher =====")
+    print(f"Local IP: {local_ip}")
+    
+    # Update args if needed
+    if len(sys.argv) <= 1:
+        sys.argv = [sys.argv[0], local_ip, "5000"]
 
 if __name__ == "__main__":
     main()

@@ -1,43 +1,39 @@
-import json
+import sys
+import os
 import socket
-import pygame
-import time
-from src.client.joystick_reader import JoystickReader
-from src.client.network_client import NetworkClient
+
+def get_local_ip():
+    """Get the local machine's IP address that would be used to connect to internet"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Doesn't need to be reachable, just used to get local interface IP
+        s.connect(('8.8.8.8', 1))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except:
+        return '127.0.0.1'
 
 def main():
-    # Initialize Pygame for joystick input
-    pygame.init()
+    # Add root directory to path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     
-    # Load client configuration
-    with open('config/client_config.json') as config_file:
-        config = json.load(config_file)
+    print("===== ROV Client Launcher =====")
     
-    server_ip = config['server_ip']
-    server_port = config['server_port']
+    # If no IP is provided, ask user for server IP
+    if len(sys.argv) <= 1:
+        local_ip = get_local_ip()
+        ip_base = '.'.join(local_ip.split('.')[:3])
+        
+        server_ip = input(f"Enter server IP address (default: {ip_base}.65): ")
+        if not server_ip:
+            server_ip = f"{ip_base}.65"
+        
+        sys.argv = [sys.argv[0], server_ip]
     
-    # Create joystick reader and network client
-    joystick_reader = JoystickReader()
-    network_client = NetworkClient(server_ip, server_port)
-    
-    # Connect to the server
-    network_client.connect()
-    
-    try:
-        while True:
-            # Read joystick inputs
-            joystick_data = joystick_reader.read_inputs()
-            
-            # Send joystick data to the server
-            network_client.send_data(joystick_data)
-            
-            # Delay to limit the sending rate
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("Client stopped.")
-    finally:
-        network_client.disconnect()
-        pygame.quit()
+    # Import and run client
+    from src.client.network_client import main as client_main
+    client_main()
 
 if __name__ == "__main__":
     main()
