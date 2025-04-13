@@ -30,6 +30,12 @@ class ROVClient:
         self.arrow_scale = 1.0
         self.rov_led_color = (0, 255, 0)
         
+        # Camera control
+        self.camera_rot_x = 45  # Initial camera rotation around X axis
+        self.camera_rot_y = 0   # Initial camera rotation around Y axis
+        self.mouse_pressed = False
+        self.last_mouse_pos = None
+        
         # Motor states and control
         self.motor_commands = {
             'left_motor': {'direction': 0, 'speed': 0},
@@ -307,7 +313,7 @@ class ROVClient:
         pygame.display.flip()
     
     def _setup_main_view(self):
-        """Setup the main perspective view"""
+        """Setup the main perspective view with mouse-controlled rotation"""
         glViewport(self.screen_width - self.main_view_width, 
                   self.screen_height - self.main_view_height,
                   self.main_view_width, self.main_view_height)
@@ -317,7 +323,9 @@ class ROVClient:
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         glTranslatef(0.0, -1.0, -7.0)
-        glRotatef(45, 1, 0, 0)
+        # Apply camera rotations from mouse control
+        glRotatef(self.camera_rot_x, 1, 0, 0)
+        glRotatef(self.camera_rot_y, 0, 1, 0)
         
     def _setup_top_view(self):
         """Setup the top-down orthographic view"""
@@ -671,6 +679,35 @@ class ROVClient:
         
         print("Calibration complete!")
     
+    def handle_mouse_control(self, event):
+        """Handle mouse events for rotating the main view"""
+        # Check if the mouse is in the main view area
+        x, y = event.pos
+        in_main_view = (x >= self.screen_width - self.main_view_width and 
+                       y <= self.main_view_height)
+        
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_main_view:
+            self.mouse_pressed = True
+            self.last_mouse_pos = event.pos
+        
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.mouse_pressed = False
+        
+        elif event.type == pygame.MOUSEMOTION and self.mouse_pressed:
+            if self.last_mouse_pos:
+                # Calculate mouse movement deltas
+                dx = event.pos[0] - self.last_mouse_pos[0]
+                dy = event.pos[1] - self.last_mouse_pos[1]
+                
+                # Update camera angles (adjust sensitivity as needed)
+                self.camera_rot_y += dx * 0.5
+                self.camera_rot_x += dy * 0.5
+                
+                # Apply limits to prevent camera flipping
+                self.camera_rot_x = max(0, min(89, self.camera_rot_x))
+                
+                self.last_mouse_pos = event.pos
+    
     def close(self):
         """Close connections and clean up"""
         if self.connected and self.socket:
@@ -741,6 +778,9 @@ def main():
                     # Y button (Triangle on PS4) for calibration
                     if event.button == 3:  # Adjust for your controller
                         client.calibrate_joystick()
+                # Handle mouse events
+                elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+                    client.handle_mouse_control(event)
             
             # Read joystick and update motor commands
             client.read_joystick()
