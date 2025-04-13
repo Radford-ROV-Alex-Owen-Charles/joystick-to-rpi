@@ -6,6 +6,7 @@ import struct
 import sys
 import serial
 import ipaddress
+from zeroconf import ServiceInfo, Zeroconf  # Add this import
 
 class SimpleServer:
     def __init__(self, host='0.0.0.0', port=5000):
@@ -23,6 +24,10 @@ class SimpleServer:
         # Motor states and watchdog
         self.last_command_time = 0
         self.watchdog_timeout = 2.0  # seconds
+        
+        # Zeroconf service
+        self.zeroconf = None
+        self.service_info = None
     
     def connect_to_arduino(self, port=None):
         """Connect to Arduino over serial"""
@@ -75,6 +80,56 @@ class SimpleServer:
         except Exception as e:
             print(f"Error sending to Arduino: {e}")
     
+    def register_zeroconf_service(self):
+        """Register this server as a Zeroconf service for auto-discovery"""
+        try:
+            # Get the best IP address for client connections
+            local_ip = self._get_best_local_ip()
+            if not local_ip or local_ip == '127.0.0.1':
+                print("Warning: Could not determine local IP for Zeroconf")
+                return False
+            
+            # Prepare service info
+            service_name = "ROV Control Server._rovcontrol._tcp.local."
+            self.service_info = ServiceInfo(
+                "_rovcontrol._tcp.local.",
+                service_name,
+                addresses=[socket.inet_aton(local_ip)],
+                port=self.port,
+                properties={
+                    "version": "1.0",
+                    "name": "ROV Control"
+                },
+                server=f"rovserver-{socket.gethostname().replace('.', '-')}.local."
+            )
+            
+            # Register service
+            self.zeroconf = Zeroconf()
+            self.zeroconf.register_service(self.service_info)
+            print(f"Registered Zeroconf service: {service_name}")
+            print(f"Service is discoverable at {local_ip}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"Error registering Zeroconf service: {e}")
+            return False
+    
+    def _get_best_local_ip(self):
+        """Get the best IP address for client connections"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # We don't actually connect to Google DNS
+            s.connect(('8.8.8.8', 1))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            # Get all local IPs and use first non-loopback
+            ips = self._get_local_ips()
+            for ip in ips:
+                if ip != '127.0.0.1':
+                    return ip
+            return '127.0.0.1'
+    
     def start(self):
         """Start the server"""
         try:
@@ -104,6 +159,9 @@ class SimpleServer:
                 print(f"  {ip}")
                 
             self.running = True
+            
+            # Register Zeroconf service for discovery
+            self.register_zeroconf_service()
             
             # Start the watchdog thread
             watchdog_thread = threading.Thread(target=self.watchdog_loop)
@@ -253,6 +311,17 @@ class SimpleServer:
     def stop(self):
         """Stop the server"""
         self.running = False
+        
+        # Unregister Zeroconf service
+        if self.zeroconf and self.service_info:
+            try:
+                print("Unregistering Zeroconf service...")
+                self.zeroconf.unregister_service(self.service_info)
+                self.zeroconf.close()
+            except:
+                pass
+            self.zeroconf = None
+            self.service_info = None
         
         # Close client socket
         if self.client_socket:

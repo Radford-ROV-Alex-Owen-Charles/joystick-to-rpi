@@ -9,6 +9,26 @@ import math
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
+from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange  # Add this import
+
+# Add this new class to handle Zeroconf discovery
+class ROVServiceListener:
+    def __init__(self):
+        self.found_services = []
+        self.discovery_complete = threading.Event()
+    
+    def remove_service(self, zeroconf, type, name):
+        pass
+    
+    def add_service(self, zeroconf, type, name, state_change):
+        if state_change == ServiceStateChange.Added:
+            info = zeroconf.get_service_info(type, name)
+            if info:
+                if len(info.addresses) > 0:
+                    server_ip = socket.inet_ntoa(info.addresses[0])
+                    server_port = info.port
+                    self.found_services.append((server_ip, server_port, name))
+                    print(f"Found ROV service: {name} at {server_ip}:{server_port}")
 
 class ROVClient:
     def __init__(self, server_ip="192.168.0.65", server_port=5000):
@@ -109,6 +129,29 @@ class ROVClient:
         except Exception as e:
             print(f"Error initializing joystick: {e}")
             return False
+    
+    def discover_server_zeroconf(self, timeout=5):
+        """Discover the ROV server using Zeroconf/mDNS"""
+        print("Searching for ROV server using Zeroconf...")
+        
+        zeroconf = Zeroconf()
+        listener = ROVServiceListener()
+        browser = ServiceBrowser(zeroconf, "_rovcontrol._tcp.local.", listener)
+        
+        # Wait for discovery for up to timeout seconds
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if listener.found_services:
+                # Take the first found service
+                server_ip, server_port, name = listener.found_services[0]
+                zeroconf.close()
+                print(f"Selected ROV server at {server_ip}:{server_port}")
+                return server_ip, server_port
+            time.sleep(0.1)
+        
+        zeroconf.close()
+        print("No ROV server found via Zeroconf")
+        return None, None
     
     def read_joystick(self):
         """Read joystick inputs and convert to motor commands"""
@@ -733,16 +776,23 @@ class ROVClient:
         pygame.quit()
 
 def main():
-    # Get server IP from command line if provided
-    server_ip = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    server_port = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
+    # Allow command-line override but use discovery by default
+    use_discovery = True
+    server_ip = None
+    server_port = 5000
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1].lower() != "auto":
+            server_ip = sys.argv[1]
+            use_discovery = False
+    
+    if len(sys.argv) > 2:
+        server_port = int(sys.argv[2])
     
     print("====== ROV Control Client with Visualization ======")
-    print(f"Target Server: {server_ip}:{server_port}")
-    print("Initializing... please wait...")
     
-    # Create client
-    client = ROVClient(server_ip, server_port)
+    # Create client with placeholder IP (will be updated)
+    client = ROVClient("discovering...", server_port)
     
     # Connect to joystick first
     if not client.connect_to_joystick():
@@ -752,7 +802,20 @@ def main():
     # Initialize visualization
     client.initialize_visualization()
     
-    # Connect to server (non-critical, will work in offline mode if server unavailable)
+    # Auto-discover server if requested
+    if use_discovery:
+        discovered_ip, discovered_port = client.discover_server_zeroconf()
+        if discovered_ip:
+            server_ip = discovered_ip
+            server_port = discovered_port
+    
+    # Connect to server (fallback to default if not discovered)
+    if server_ip is None:
+        server_ip = "127.0.0.1"  # Default if not specified or discovered
+        
+    client.server_ip = server_ip
+    client.server_port = server_port
+    print(f"Connecting to server at {server_ip}:{server_port}")
     client.connect_to_server()
     
     print("\nControls:")
