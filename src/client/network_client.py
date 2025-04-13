@@ -142,11 +142,25 @@ class ROVClient:
         start_time = time.time()
         while time.time() - start_time < timeout:
             if listener.found_services:
-                # Take the first found service
-                server_ip, server_port, name = listener.found_services[0]
-                zeroconf.close()
-                print(f"Selected ROV server at {server_ip}:{server_port}")
-                return server_ip, server_port
+                # Try all found services until one connects
+                for server_ip, server_port, name in listener.found_services:
+                    print(f"Testing connection to server at {server_ip}:{server_port}")
+                    # Test connection
+                    try:
+                        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_socket.settimeout(2)
+                        test_socket.connect((server_ip, server_port))
+                        test_socket.close()
+                        print(f"Connection successful to {server_ip}:{server_port}")
+                        zeroconf.close()
+                        return server_ip, server_port
+                    except Exception as e:
+                        print(f"Failed to connect: {e}")
+                        continue
+                
+                # If we reach here, none of the servers responded
+                print("Found servers, but couldn't connect to any of them.")
+                break
             time.sleep(0.1)
         
         zeroconf.close()
@@ -808,10 +822,31 @@ def main():
         if discovered_ip:
             server_ip = discovered_ip
             server_port = discovered_port
+        else:
+            # Discovery failed - try common direct-connected IP ranges
+            print("Trying common direct-connect IP addresses...")
+            for test_ip in ["192.168.2.2", "192.168.1.2", "10.42.0.2", "169.254.0.2"]:
+                print(f"Testing {test_ip}...")
+                try:
+                    test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    test_socket.settimeout(1)
+                    test_socket.connect((test_ip, server_port))
+                    test_socket.close()
+                    print(f"Connection successful to {test_ip}")
+                    server_ip = test_ip
+                    break
+                except:
+                    pass
     
     # Connect to server (fallback to default if not discovered)
     if server_ip is None:
-        server_ip = "127.0.0.1"  # Default if not specified or discovered
+        # Ask user for IP address
+        print("\nAutomatic discovery failed. Please enter the Raspberry Pi's IP address:")
+        user_ip = input("> ").strip()
+        if user_ip:
+            server_ip = user_ip
+        else:
+            server_ip = "127.0.0.1"  # Last resort default
         
     client.server_ip = server_ip
     client.server_port = server_port

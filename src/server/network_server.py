@@ -89,12 +89,30 @@ class SimpleServer:
                 print("Warning: Could not determine local IP for Zeroconf")
                 return False
             
+            print(f"Registering with IP: {local_ip}")
+
+            # Get all local IPs for debugging
+            all_ips = self._get_local_ips()
+            print(f"All available IPs: {all_ips}")
+            
+            # Prepare service info with ALL addresses to improve discovery odds
+            addresses = []
+            for ip in all_ips:
+                if ip != '127.0.0.1':
+                    try:
+                        addresses.append(socket.inet_aton(ip))
+                    except:
+                        pass
+                        
+            if not addresses:
+                addresses = [socket.inet_aton(local_ip)]
+            
             # Prepare service info
             service_name = "ROV Control Server._rovcontrol._tcp.local."
             self.service_info = ServiceInfo(
                 "_rovcontrol._tcp.local.",
                 service_name,
-                addresses=[socket.inet_aton(local_ip)],
+                addresses=addresses,  # Use all addresses
                 port=self.port,
                 properties={
                     "version": "1.0",
