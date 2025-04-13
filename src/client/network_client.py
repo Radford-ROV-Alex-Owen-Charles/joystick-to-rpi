@@ -6,6 +6,7 @@ import sys
 import struct
 import threading
 import math
+import subprocess
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -99,21 +100,27 @@ class ROVClient:
     def connect_to_server(self):
         """Connect to the ROV server"""
         try:
+            print(f"Attempting to connect to {self.server_ip}:{self.server_port}...")
+            
+            # Create socket with timeout
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5)
+            self.socket.settimeout(10)  # Longer timeout for direct connections
+            
+            # Try to connect
             self.socket.connect((self.server_ip, self.server_port))
             self.connected = True
-            print(f"Connected to server at {self.server_ip}:{self.server_port}")
+            print(f"Successfully connected to server at {self.server_ip}:{self.server_port}")
             
-            # Start a background thread to receive data
-            self.receive_thread = threading.Thread(target=self.receive_data)
-            self.receive_thread.daemon = True
-            self.receive_thread.start()
+            # Start receiving thread
+            recv_thread = threading.Thread(target=self.receive_data)
+            recv_thread.daemon = True
+            recv_thread.start()
             
             return True
         except Exception as e:
             print(f"Error connecting to server: {e}")
-            print("Running in offline mode...")
+            if self.socket:
+                self.socket.close()
             self.socket = None
             self.connected = False
             return False
@@ -139,37 +146,69 @@ class ROVClient:
         
         zeroconf = Zeroconf()
         listener = ROVServiceListener()
-        # Use the ServiceBrowser with the updated listener
         browser = ServiceBrowser(zeroconf, "_rovcontrol._tcp.local.", listener)
         
         # Wait for discovery for up to timeout seconds
         start_time = time.time()
         while time.time() - start_time < timeout:
             if listener.found_services:
-                # Try all found services until one connects
+                # Try each discovered service
                 for server_ip, server_port, name in listener.found_services:
-                    print(f"Testing connection to server at {server_ip}:{server_port}")
-                    # Test connection
-                    try:
-                        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        test_socket.settimeout(2)
-                        test_socket.connect((server_ip, server_port))
-                        test_socket.close()
-                        print(f"Connection successful to {server_ip}:{server_port}")
-                        zeroconf.close()
-                        return server_ip, server_port
-                    except Exception as e:
-                        print(f"Failed to connect: {e}")
-                        continue
+                    print(f"Testing connection to {server_ip}:{server_port}...")
+                    
+                    # Check basic connectivity first with a ping
+                    if self._test_ping(server_ip):
+                        print(f"Successful ping to {server_ip}")
+                        
+                        # Now try TCP connection
+                        if self._test_connection(server_ip, server_port):
+                            print(f"Successful connection test to {server_ip}:{server_port}")
+                            zeroconf.close()
+                            return server_ip, server_port
+                        else:
+                            print(f"TCP connection to {server_ip}:{server_port} failed")
+                    else:
+                        print(f"Ping to {server_ip} failed")
                 
-                # If we reach here, none of the servers responded
-                print("Found servers, but couldn't connect to any of them.")
-                break
-            time.sleep(0.1)
+                # If no successful connections, try alternative IPs from the same devices
+                print("Trying alternative IP detection...")
+                for ip_base in ["169.254.", "192.168.", "10.0."]:
+                    for i in range(1, 10):
+                        test_ip = f"{ip_base}0.{i}"
+                        if self._test_connection(test_ip, self.server_port):
+                            print(f"Found server through alternative scan: {test_ip}")
+                            zeroconf.close()
+                            return test_ip, self.server_port
+            time.sleep(0.5)
         
         zeroconf.close()
         print("No ROV server found via Zeroconf")
         return None, None
+    
+    def _test_ping(self, ip, timeout=1):
+        """Test basic connectivity with a quick ping"""
+        try:
+            # Platform-specific ping command
+            if sys.platform.lower().startswith("win"):
+                command = ["ping", "-n", "1", "-w", str(timeout * 1000), ip]
+            else:
+                command = ["ping", "-c", "1", "-W", str(timeout), ip]
+            
+            # Run the ping
+            return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        except:
+            return False
+    
+    def _test_connection(self, ip, port, timeout=1):
+        """Test if a TCP connection can be established"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((ip, port))
+            s.close()
+            return True
+        except:
+            return False
     
     def read_joystick(self):
         """Read joystick inputs and convert to motor commands"""

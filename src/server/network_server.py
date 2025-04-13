@@ -148,6 +148,50 @@ class SimpleServer:
                     return ip
             return '127.0.0.1'
     
+    def _get_local_ips(self):
+        """Get all local IP addresses including direct connection interfaces"""
+        local_ips = []
+        try:
+            # Get all network interfaces
+            interfaces = socket.getaddrinfo(socket.gethostname(), None)
+            for interface in interfaces:
+                ip = interface[4][0]
+                # Don't add loopback addresses
+                if ip != '127.0.0.1' and not ip.startswith('::'):
+                    local_ips.append(ip)
+                    
+            # For direct connections, also look for link-local addresses (169.254.x.x)
+            try:
+                import netifaces
+                for interface in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        for addr in addrs[netifaces.AF_INET]:
+                            ip = addr['addr']
+                            if ip != '127.0.0.1':
+                                local_ips.append(ip)
+                                # If this is a direct connection (likely 169.254.x.x), prioritize it
+                                if ip.startswith('169.254'):
+                                    print(f"Found likely direct connection IP: {ip}")
+                                    # Put it at the beginning of the list
+                                    local_ips.insert(0, ip)
+            except ImportError:
+                # Fall back to subnet scanning for direct connection IPs
+                for subnet in ["169.254", "192.168", "10.0", "172.16"]:
+                    try:
+                        # Use common direct connection subnets
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.bind((f"{subnet}.1.1", 0))
+                        s.close()
+                        local_ips.append(f"{subnet}.1.1")
+                    except:
+                        pass
+        except:
+            pass
+            
+        # Remove duplicates
+        return list(set(local_ips))
+    
     def start(self):
         """Start the server"""
         try:
@@ -155,17 +199,21 @@ class SimpleServer:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
+            # Allow quick reuse of the port - important for testing/restarting
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Increase socket timeouts to handle slower connections
+            self.server_socket.settimeout(10)
+            
+            # Always bind to all interfaces - required for direct connections
+            self.host = '0.0.0.0'
+            print(f"Binding to all interfaces ({self.host}:{self.port})")
+            
             try:
-                print(f"Attempting to bind to {self.host}:{self.port}")
                 self.server_socket.bind((self.host, self.port))
             except socket.error as e:
-                if self.host != '0.0.0.0':
-                    print(f"Failed to bind to {self.host}:{self.port} - {e}")
-                    print("Trying to bind to all interfaces (0.0.0.0) instead...")
-                    self.host = '0.0.0.0'
-                    self.server_socket.bind((self.host, self.port))
-                else:
-                    raise
+                print(f"Failed to bind: {e}")
+                raise
                     
             self.server_socket.listen(1)
             
@@ -190,51 +238,24 @@ class SimpleServer:
             while self.running:
                 try:
                     print("Waiting for client connection...")
+                    self.server_socket.settimeout(None)  # No timeout during accept
                     self.client_socket, addr = self.server_socket.accept()
                     print(f"Client connected from {addr}")
+                    
+                    # Set a reasonable timeout for client operations
+                    self.client_socket.settimeout(5)
                     
                     # Handle this client
                     self.handle_client()
                     
                 except Exception as e:
-                    print(f"Error accepting connection: {e}")
+                    print(f"Error in connection handling: {e}")
                     time.sleep(1)
             
         except Exception as e:
             print(f"Server error: {e}")
         finally:
             self.stop()
-
-    def _get_local_ips(self):
-        """Get all local IP addresses"""
-        local_ips = []
-        try:
-            # Try to get IP addresses on this machine
-            hostname = socket.gethostname()
-            local_ips.append(socket.gethostbyname(hostname))
-            
-            # Try to get the IP used for internet connection
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(('8.8.8.8', 1))
-                local_ips.append(s.getsockname()[0])
-                s.close()
-            except:
-                pass
-                
-            # On unix-like systems, try to get all interfaces
-            if not sys.platform.startswith('win'):
-                try:
-                    import subprocess
-                    output = subprocess.check_output("hostname -I", shell=True).decode().strip()
-                    local_ips.extend(output.split())
-                except:
-                    pass
-        except:
-            pass
-            
-        # Remove duplicates and loopback
-        return [ip for ip in set(local_ips) if ip != '127.0.0.1']
     
     def handle_client(self):
         """Handle communication with a connected client"""
