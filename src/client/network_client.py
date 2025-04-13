@@ -20,15 +20,18 @@ class ROVServiceListener:
     def remove_service(self, zeroconf, type, name):
         pass
     
-    def add_service(self, zeroconf, type, name, state_change):
-        if state_change == ServiceStateChange.Added:
-            info = zeroconf.get_service_info(type, name)
-            if info:
-                if len(info.addresses) > 0:
-                    server_ip = socket.inet_ntoa(info.addresses[0])
-                    server_port = info.port
-                    self.found_services.append((server_ip, server_port, name))
-                    print(f"Found ROV service: {name} at {server_ip}:{server_port}")
+    def update_service(self, zeroconf, type, name):
+        # This method is now required by Zeroconf
+        pass
+    
+    def add_service(self, zeroconf, type, name):
+        info = zeroconf.get_service_info(type, name)
+        if info:
+            if len(info.addresses) > 0:
+                server_ip = socket.inet_ntoa(info.addresses[0])
+                server_port = info.port
+                self.found_services.append((server_ip, server_port, name))
+                print(f"Found ROV service: {name} at {server_ip}:{server_port}")
 
 class ROVClient:
     def __init__(self, server_ip="192.168.0.65", server_port=5000):
@@ -136,6 +139,7 @@ class ROVClient:
         
         zeroconf = Zeroconf()
         listener = ROVServiceListener()
+        # Use the ServiceBrowser with the updated listener
         browser = ServiceBrowser(zeroconf, "_rovcontrol._tcp.local.", listener)
         
         # Wait for discovery for up to timeout seconds
