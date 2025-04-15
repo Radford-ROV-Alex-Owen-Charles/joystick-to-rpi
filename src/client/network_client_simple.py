@@ -352,6 +352,36 @@ class ROVClient:
                 self.connected = False
                 break
     
+    def discover_server_zeroconf(self):
+        """Discover ROV server using Zeroconf"""
+        print("Searching for ROV servers on the network...")
+        
+        zeroconf = Zeroconf()
+        listener = ROVServiceListener()
+        browser = ServiceBrowser(zeroconf, "_rov._tcp.local.", listener)
+        
+        # Wait for discovery (with timeout)
+        discovery_timeout = 5.0  # seconds
+        start_time = time.time()
+        
+        while time.time() - start_time < discovery_timeout:
+            if listener.found_services:
+                # Service found, stop browsing
+                break
+            time.sleep(0.1)  # Small pause to prevent CPU hogging
+        
+        # Clean up
+        zeroconf.close()
+        
+        # Return the first found service, or None if none found
+        if listener.found_services:
+            server_ip, server_port, service_name = listener.found_services[0]
+            print(f"Discovered ROV server: {service_name} at {server_ip}:{server_port}")
+            return server_ip, server_port
+        else:
+            print("No ROV servers discovered on the network")
+            return None, None
+    
     def render(self):
         """Render the 2D visualization"""
         # Fill background
