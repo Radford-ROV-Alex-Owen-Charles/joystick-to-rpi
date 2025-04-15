@@ -17,6 +17,11 @@ class OmniDirectionalControl:
         self.stick_dead_zone = 0.1
         self.trigger_dead_zone = 0.1
         
+        # Calibration offsets
+        self.left_stick_x_offset = 0.0
+        self.left_stick_y_offset = 0.0
+        self.right_stick_x_offset = 0.0
+        
         # Motor mapping (45 degree corner positions)
         # Each motor contributes to movement in specific directions
         self.motor_mapping = {
@@ -44,7 +49,7 @@ class OmniDirectionalControl:
             'vertical_motor': {'direction': 0, 'speed': 0}
         }
 
-    def process_input(self, joystick):
+    def process_input(self, joystick, rov_rotation=0):
         """Process joystick input and calculate motor values for omnidirectional movement"""
         if not joystick:
             return self.motor_commands
@@ -52,18 +57,26 @@ class OmniDirectionalControl:
         # Update pygame events
         pygame.event.pump()
         
-        # Get movement vectors from joystick
+        # Get raw movement vectors from joystick
         # Forward/backward from left stick Y-axis (inverted)
-        forward = -joystick.get_axis(1)
+        raw_forward = -joystick.get_axis(1) - self.left_stick_y_offset
         # Left/right strafe from left stick X-axis
-        strafe = joystick.get_axis(0)
+        raw_strafe = joystick.get_axis(0) - self.left_stick_x_offset
         # Rotation from right stick X-axis
-        rotation = joystick.get_axis(2)
+        rotation = joystick.get_axis(2) - self.right_stick_x_offset
         
         # Apply deadzone to sticks
-        forward = 0 if abs(forward) < self.stick_dead_zone else forward
-        strafe = 0 if abs(strafe) < self.stick_dead_zone else strafe
+        raw_forward = 0 if abs(raw_forward) < self.stick_dead_zone else raw_forward
+        raw_strafe = 0 if abs(raw_strafe) < self.stick_dead_zone else raw_strafe
         rotation = 0 if abs(rotation) < self.stick_dead_zone else rotation
+        
+        # Convert ROV rotation to radians
+        rotation_rad = math.radians(rov_rotation)
+        
+        # Rotate the input based on ROV orientation
+        # This makes forward always relative to the ROV's current facing
+        forward = raw_forward * math.cos(rotation_rad) - raw_strafe * math.sin(rotation_rad)
+        strafe = raw_forward * math.sin(rotation_rad) + raw_strafe * math.cos(rotation_rad)
         
         # Get vertical movement from triggers
         vertical = 0
@@ -145,7 +158,7 @@ class ROVServiceListener:
                 print(f"Found ROV service: {name} at {server_ip}:{server_port}")
 
 class ROVClient:
-    def __init__(self, server_ip="192.168.0.65", server_port=5000):
+    def __init__(self, server_ip="192.168.0.201", server_port=5000):
         # Network settings
         self.server_ip = server_ip
         self.server_port = server_port
@@ -263,7 +276,7 @@ class ROVClient:
             return False
         
         # Process joystick input with omnidirectional control
-        self.motor_commands = self.omni_control.process_input(self.joystick)
+        self.motor_commands = self.omni_control.process_input(self.joystick, self.rov_rotation)
         
         # Update visualization variables
         # Get joystick values for visualization
@@ -671,10 +684,16 @@ class ROVClient:
             print(f"Calibrating in {3-i}...")
             time.sleep(0.5)
             
-        # Read current position as center (not actually used in this implementation)
+        # Read current position and store as offsets
         pygame.event.pump()
         
+        # Store current joystick positions as the zero position
+        self.omni_control.left_stick_x_offset = self.joystick.get_axis(0)
+        self.omni_control.left_stick_y_offset = self.joystick.get_axis(1)
+        self.omni_control.right_stick_x_offset = self.joystick.get_axis(2)
+        
         print("Calibration complete!")
+        print(f"Offsets: X={self.omni_control.left_stick_x_offset:.3f}, Y={self.omni_control.left_stick_y_offset:.3f}, Rot={self.omni_control.right_stick_x_offset:.3f}")
     
     def close(self):
         """Close connections and clean up"""
@@ -744,7 +763,7 @@ def main():
         else:
             # Discovery failed - try common direct-connected IP ranges
             print("Trying common direct-connect IP addresses...")
-            for test_ip in ["192.168.2.2", "192.168.1.2", "10.42.0.2", "169.254.0.2"]:
+            for test_ip in ["192.168.2.2", "192.168.1.2", "10.42.0.2", "169.254.0.2", "192.168.0.201"]:
                 print(f"Testing {test_ip}...")
                 try:
                     test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
