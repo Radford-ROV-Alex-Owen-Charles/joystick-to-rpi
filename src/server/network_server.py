@@ -69,12 +69,31 @@ class SimpleServer:
             return
         
         try:
-            # Format command: M,L_DIR,L_SPD,R_DIR,R_SPD,V_DIR,V_SPD\n
-            left = motor_commands.get('left_motor', {'direction': 0, 'speed': 0})
-            right = motor_commands.get('right_motor', {'direction': 0, 'speed': 0})
+            # Format command for 5 motors:
+            # M,FL_DIR,FL_SPD,FR_DIR,FR_SPD,RL_DIR,RL_SPD,RR_DIR,RR_SPD,V_DIR,V_SPD\n
+            front_left = motor_commands.get('front_left_motor', {'direction': 0, 'speed': 0})
+            front_right = motor_commands.get('front_right_motor', {'direction': 0, 'speed': 0})
+            rear_left = motor_commands.get('rear_left_motor', {'direction': 0, 'speed': 0})
+            rear_right = motor_commands.get('rear_right_motor', {'direction': 0, 'speed': 0})
             vertical = motor_commands.get('vertical_motor', {'direction': 0, 'speed': 0})
             
-            cmd = f"M,{left['direction']},{left['speed']},{right['direction']},{right['speed']},{vertical['direction']},{vertical['speed']}\n"
+            # Fallback for compatibility with old clients that use left/right motors
+            if 'left_motor' in motor_commands and 'front_left_motor' not in motor_commands:
+                left = motor_commands.get('left_motor', {'direction': 0, 'speed': 0})
+                right = motor_commands.get('right_motor', {'direction': 0, 'speed': 0})
+                
+                # Map tank controls to corner motors
+                front_left = {'direction': left['direction'], 'speed': left['speed']}
+                front_right = {'direction': right['direction'], 'speed': right['speed']}
+                rear_left = {'direction': left['direction'], 'speed': left['speed']}
+                rear_right = {'direction': right['direction'], 'speed': right['speed']}
+            
+            cmd = f"M,{front_left['direction']},{front_left['speed']}," + \
+                  f"{front_right['direction']},{front_right['speed']}," + \
+                  f"{rear_left['direction']},{rear_left['speed']}," + \
+                  f"{rear_right['direction']},{rear_right['speed']}," + \
+                  f"{vertical['direction']},{vertical['speed']}\n"
+            
             self.serial_port.write(cmd.encode('utf-8'))
             print(f"Sent to Arduino: {cmd.strip()}")
         except Exception as e:
@@ -338,8 +357,10 @@ class SimpleServer:
             if time.time() - self.last_command_time > self.watchdog_timeout:
                 # No commands recently, stop motors
                 stop_cmd = {
-                    'left_motor': {'direction': 0, 'speed': 0},
-                    'right_motor': {'direction': 0, 'speed': 0}, 
+                    'front_left_motor': {'direction': 0, 'speed': 0},
+                    'front_right_motor': {'direction': 0, 'speed': 0},
+                    'rear_left_motor': {'direction': 0, 'speed': 0},
+                    'rear_right_motor': {'direction': 0, 'speed': 0},
                     'vertical_motor': {'direction': 0, 'speed': 0}
                 }
                 print("Watchdog: No commands received recently, stopping motors")
@@ -383,8 +404,10 @@ class SimpleServer:
             try:
                 # Stop motors first
                 stop_cmd = {
-                    'left_motor': {'direction': 0, 'speed': 0},
-                    'right_motor': {'direction': 0, 'speed': 0}, 
+                    'front_left_motor': {'direction': 0, 'speed': 0},
+                    'front_right_motor': {'direction': 0, 'speed': 0},
+                    'rear_left_motor': {'direction': 0, 'speed': 0},
+                    'rear_right_motor': {'direction': 0, 'speed': 0},
                     'vertical_motor': {'direction': 0, 'speed': 0}
                 }
                 self.send_to_arduino(stop_cmd)

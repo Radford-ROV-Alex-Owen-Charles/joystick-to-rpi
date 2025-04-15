@@ -10,6 +10,119 @@ import subprocess
 from pygame.locals import *
 from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
 
+class OmniDirectionalControl:
+    def __init__(self):
+        """Initialize the omnidirectional control system"""
+        # Controller deadzone
+        self.stick_dead_zone = 0.1
+        self.trigger_dead_zone = 0.1
+        
+        # Motor mapping (45 degree corner positions)
+        # Each motor contributes to movement in specific directions
+        self.motor_mapping = {
+            'front_left': {'x': -1, 'y': 1, 'rotation': 1},   # Front left motor
+            'front_right': {'x': 1, 'y': 1, 'rotation': -1},  # Front right motor
+            'rear_left': {'x': -1, 'y': -1, 'rotation': -1},  # Rear left motor
+            'rear_right': {'x': 1, 'y': -1, 'rotation': 1}    # Rear right motor
+        }
+        
+        # Motor output values normalized from -1.0 to 1.0
+        self.motor_outputs = {
+            'front_left': 0,
+            'front_right': 0,
+            'rear_left': 0,
+            'rear_right': 0,
+            'vertical': 0  # Vertical motor for up/down
+        }
+        
+        # Direction and speed format (for the server)
+        self.motor_commands = {
+            'front_left_motor': {'direction': 0, 'speed': 0},
+            'front_right_motor': {'direction': 0, 'speed': 0},
+            'rear_left_motor': {'direction': 0, 'speed': 0},
+            'rear_right_motor': {'direction': 0, 'speed': 0},
+            'vertical_motor': {'direction': 0, 'speed': 0}
+        }
+
+    def process_input(self, joystick):
+        """Process joystick input and calculate motor values for omnidirectional movement"""
+        if not joystick:
+            return self.motor_commands
+        
+        # Update pygame events
+        pygame.event.pump()
+        
+        # Get movement vectors from joystick
+        # Forward/backward from left stick Y-axis (inverted)
+        forward = -joystick.get_axis(1)
+        # Left/right strafe from left stick X-axis
+        strafe = joystick.get_axis(0)
+        # Rotation from right stick X-axis
+        rotation = joystick.get_axis(2)
+        
+        # Apply deadzone to sticks
+        forward = 0 if abs(forward) < self.stick_dead_zone else forward
+        strafe = 0 if abs(strafe) < self.stick_dead_zone else strafe
+        rotation = 0 if abs(rotation) < self.stick_dead_zone else rotation
+        
+        # Get vertical movement from triggers
+        vertical = 0
+        if joystick.get_numaxes() > 4:
+            # L2 trigger for down
+            l2_trigger = (joystick.get_axis(4) + 1) / 2  # Convert -1 to 1 range to 0 to 1
+            # R2 trigger for up
+            r2_trigger = (joystick.get_axis(5) + 1) / 2 if joystick.get_numaxes() > 5 else 0
+            
+            # Apply deadzone to triggers
+            l2_trigger = 0 if l2_trigger < self.trigger_dead_zone else l2_trigger
+            r2_trigger = 0 if r2_trigger < self.trigger_dead_zone else r2_trigger
+            
+            # Calculate vertical movement (positive = up, negative = down)
+            vertical = r2_trigger - l2_trigger
+        
+        # Calculate base motor values for omnidirectional movement
+        for motor, mapping in self.motor_mapping.items():
+            # Combine all movement components with proper direction for each motor
+            self.motor_outputs[motor] = (
+                forward * mapping['y'] +  # Y contribution (forward/backward)
+                strafe * mapping['x'] +   # X contribution (left/right)
+                rotation * mapping['rotation']  # Rotation contribution
+            )
+        
+        # Set vertical motor
+        self.motor_outputs['vertical'] = vertical
+        
+        # Normalize motor values if any exceed 1.0
+        max_value = max(abs(value) for value in self.motor_outputs.values())
+        if max_value > 1.0:
+            for motor in self.motor_outputs:
+                self.motor_outputs[motor] /= max_value
+        
+        # Convert normalized values (-1.0 to 1.0) to direction/speed format
+        for motor in self.motor_mapping:
+            output = self.motor_outputs[motor]
+            cmd_motor = f"{motor}_motor"
+            
+            # Motor direction: 1 for positive, 0 for negative
+            direction = 1 if output >= 0 else 0
+            
+            # Motor speed: absolute value mapped to 0-255
+            speed = int(abs(output) * 255)
+            
+            self.motor_commands[cmd_motor] = {
+                'direction': direction,
+                'speed': speed
+            }
+        
+        # Handle vertical motor
+        vertical_output = self.motor_outputs['vertical']
+        self.motor_commands['vertical_motor'] = {
+            'direction': 1 if vertical_output >= 0 else 0,
+            'speed': int(abs(vertical_output) * 255)
+        }
+        
+        return self.motor_commands
+
 class ROVServiceListener:
     def __init__(self):
         self.found_services = []
@@ -51,10 +164,15 @@ class ROVClient:
         
         # Motor states and control
         self.motor_commands = {
-            'left_motor': {'direction': 0, 'speed': 0},
-            'right_motor': {'direction': 0, 'speed': 0},
+            'front_left_motor': {'direction': 0, 'speed': 0},
+            'front_right_motor': {'direction': 0, 'speed': 0},
+            'rear_left_motor': {'direction': 0, 'speed': 0},
+            'rear_right_motor': {'direction': 0, 'speed': 0},
             'vertical_motor': {'direction': 0, 'speed': 0}
         }
+        
+        # Create omnidirectional control system
+        self.omni_control = OmniDirectionalControl()
         
         # Telemetry data received from server
         self.telemetry = {
@@ -82,7 +200,7 @@ class ROVClient:
             'motor_low': (0, 255, 0),
             'motor_high': (255, 0, 0)
         }
-        
+    
     def initialize_visualization(self):
         """Initialize 2D visualization"""
         # Set up display
@@ -95,7 +213,7 @@ class ROVClient:
         self.title_font = pygame.font.SysFont('Arial', 24)
         self.info_font = pygame.font.SysFont('Arial', 18)
         self.small_font = pygame.font.SysFont('Arial', 14)
-        
+    
     def connect_to_server(self):
         """Connect to the ROV server"""
         try:
@@ -139,172 +257,37 @@ class ROVClient:
             print(f"Error initializing joystick: {e}")
             return False
     
-    def discover_server_zeroconf(self, timeout=5):
-        """Discover the ROV server using Zeroconf/mDNS"""
-        print("Searching for ROV server using Zeroconf...")
-        
-        zeroconf = Zeroconf()
-        listener = ROVServiceListener()
-        browser = ServiceBrowser(zeroconf, "_rovcontrol._tcp.local.", listener)
-        
-        # Wait for discovery for up to timeout seconds
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if listener.found_services:
-                # Try each discovered service
-                for server_ip, server_port, name in listener.found_services:
-                    print(f"Testing connection to {server_ip}:{server_port}...")
-                    
-                    # Check basic connectivity first with a ping
-                    if self._test_ping(server_ip):
-                        print(f"Successful ping to {server_ip}")
-                        
-                        # Now try TCP connection
-                        if self._test_connection(server_ip, server_port):
-                            print(f"Successful connection test to {server_ip}:{server_port}")
-                            zeroconf.close()
-                            return server_ip, server_port
-                        else:
-                            print(f"TCP connection to {server_ip}:{server_port} failed")
-                    else:
-                        print(f"Ping to {server_ip} failed")
-                
-                # If no successful connections, try alternative IPs from the same devices
-                print("Trying alternative IP detection...")
-                for ip_base in ["169.254.", "192.168.", "10.0."]:
-                    for i in range(1, 10):
-                        test_ip = f"{ip_base}0.{i}"
-                        if self._test_connection(test_ip, self.server_port):
-                            print(f"Found server through alternative scan: {test_ip}")
-                            zeroconf.close()
-                            return test_ip, self.server_port
-            time.sleep(0.5)
-        
-        zeroconf.close()
-        print("No ROV server found via Zeroconf")
-        return None, None
-    
-    def _test_ping(self, ip, timeout=1):
-        """Test basic connectivity with a quick ping"""
-        try:
-            # Platform-specific ping command
-            if sys.platform.lower().startswith("win"):
-                command = ["ping", "-n", "1", "-w", str(timeout * 1000), ip]
-            else:
-                command = ["ping", "-c", "1", "-W", str(timeout), ip]
-            
-            # Run the ping
-            return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-        except:
-            return False
-    
-    def _test_connection(self, ip, port, timeout=1):
-        """Test if a TCP connection can be established"""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(timeout)
-            s.connect((ip, port))
-            s.close()
-            return True
-        except:
-            return False
-    
     def read_joystick(self):
-        """Read joystick inputs and convert to motor commands"""
+        """Read joystick inputs and convert to motor commands using omnidirectional control"""
         if not self.joystick:
             return False
         
-        # Update pygame events
+        # Process joystick input with omnidirectional control
+        self.motor_commands = self.omni_control.process_input(self.joystick)
+        
+        # Update visualization variables
+        # Get joystick values for visualization
         pygame.event.pump()
+        forward = -self.joystick.get_axis(1)  # Invert Y axis
+        strafe = self.joystick.get_axis(0)
         
-        # Get axis values
-        left_stick_x = self.joystick.get_axis(0)
-        left_stick_y = self.joystick.get_axis(1)
-        right_stick_x = self.joystick.get_axis(2)
+        # Calculate magnitude and direction for visualization
+        magnitude = min(1.0, math.sqrt(forward**2 + strafe**2))
+        angle = math.atan2(strafe, forward)
         
-        # Apply deadzone to sticks
-        left_stick_x = 0 if abs(left_stick_x) < self.stick_dead_zone else left_stick_x
-        left_stick_y = 0 if abs(left_stick_y) < self.stick_dead_zone else left_stick_y
-        right_stick_x = 0 if abs(right_stick_x) < self.stick_dead_zone else right_stick_x
+        # Update movement vector for visualization
+        self.horizontal_movement[0] = magnitude * math.sin(angle)
+        self.horizontal_movement[1] = magnitude * math.cos(angle)
         
-        # Get trigger values for elevation
-        elevation_control = 0
-        if self.joystick.get_numaxes() > 4:
-            l2_trigger = (self.joystick.get_axis(4) + 1) / 2  # Convert -1 to 1 range to 0 to 1
-            r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
-            
-            # Apply deadzone to triggers
-            l2_trigger = 0 if l2_trigger < self.trigger_dead_zone else l2_trigger
-            r2_trigger = 0 if r2_trigger < self.trigger_dead_zone else r2_trigger
-            
-            elevation_control = r2_trigger - l2_trigger
-        
-        # Process inputs to motor commands
-        # Negate for intuitive control (pushing up should move forward)
-        forward_component = -left_stick_y
-        strafe_component = left_stick_x
-        
-        # Reset motor commands
-        self.motor_commands = {
-            'left_motor': {'direction': 0, 'speed': 0},
-            'right_motor': {'direction': 0, 'speed': 0},
-            'vertical_motor': {'direction': 0, 'speed': 0}
-        }
-        
-        # Process forward/backward and turning
-        if abs(forward_component) > self.stick_dead_zone:
-            # Determine motor directions
-            motor_direction = 1 if forward_component > 0 else 0
-            base_power = abs(forward_component)
-            
-            # Calculate turn adjustment
-            turn_adjustment = 0
-            if abs(strafe_component) > self.stick_dead_zone:
-                turn_adjustment = abs(strafe_component)
-            
-            # Calculate motor speeds with turning
-            if strafe_component > self.stick_dead_zone:
-                # Turn right: reduce right motor speed
-                left_power = base_power
-                right_power = max(0, base_power - turn_adjustment)
-            elif strafe_component < -self.stick_dead_zone:
-                # Turn left: reduce left motor speed
-                left_power = max(0, base_power - turn_adjustment)
-                right_power = base_power
-            else:
-                # Straight: equal motor speeds
-                left_power = base_power
-                right_power = base_power
-            
-            # Set motor commands
-            self.motor_commands['left_motor']['direction'] = motor_direction
-            self.motor_commands['left_motor']['speed'] = int(left_power * 255)
-            self.motor_commands['right_motor']['direction'] = motor_direction
-            self.motor_commands['right_motor']['speed'] = int(right_power * 255)
-        
-        # Process vertical control
-        if abs(elevation_control) > self.trigger_dead_zone:
-            vertical_direction = 1 if elevation_control > 0 else 0
-            self.motor_commands['vertical_motor']['direction'] = vertical_direction
-            self.motor_commands['vertical_motor']['speed'] = int(abs(elevation_control) * 255)
-        
-        # Update rotation for visualization
-        self.rov_rotation += right_stick_x * 2
+        # Update rotation from right stick
+        self.rov_rotation += self.joystick.get_axis(2) * 2
         self.rov_rotation %= 360
         
-        # Update movement vectors for visualization
-        angle_rad = math.radians(self.rov_rotation)
-        x_from_forward = forward_component * math.sin(angle_rad)
-        z_from_forward = forward_component * math.cos(angle_rad)
-        
-        x_from_strafe = strafe_component * math.cos(angle_rad)
-        z_from_strafe = -strafe_component * math.sin(angle_rad)
-        
-        self.horizontal_movement[0] = x_from_forward + x_from_strafe
-        self.horizontal_movement[1] = z_from_forward + z_from_strafe
-        
-        # Update vertical movement for visualization
-        self.vertical_movement = elevation_control
+        # Get vertical movement
+        if self.joystick.get_numaxes() > 4:
+            l2_trigger = (self.joystick.get_axis(4) + 1) / 2
+            r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
+            self.vertical_movement = r2_trigger - l2_trigger
         
         return True
     
@@ -421,24 +404,92 @@ class ROVClient:
         center_x = rect.x + rect.width // 2
         center_y = rect.y + rect.height // 2
         
-        # Draw ROV (a simple polygon that rotates)
-        rov_size = 30
+        # Draw ROV body (now a rectangle to better show corner motors)
+        rov_size = 60
+        rov_rect = pygame.Rect(
+            center_x - rov_size//2, 
+            center_y - rov_size//2,
+            rov_size, rov_size
+        )
         
-        # Calculate points for the ROV
+        # Rotate the ROV - for simplicity we'll just rotate the corner motor positions
         angle_rad = math.radians(self.rov_rotation)
         cos_val = math.cos(angle_rad)
         sin_val = math.sin(angle_rad)
         
-        # ROV shape points (triangle with the point indicating front)
-        points = [
-            (center_x + rov_size * sin_val, center_y - rov_size * cos_val),  # Front
-            (center_x - rov_size * sin_val - rov_size//2 * cos_val, center_y + rov_size * cos_val - rov_size//2 * sin_val),  # Back Left
-            (center_x - rov_size * sin_val + rov_size//2 * cos_val, center_y + rov_size * cos_val + rov_size//2 * sin_val),  # Back Right
+        # Draw the ROV body
+        rotated_points = [
+            (center_x + rov_size//2 * sin_val + rov_size//2 * cos_val, 
+             center_y - rov_size//2 * cos_val + rov_size//2 * sin_val),  # Front right
+            (center_x - rov_size//2 * sin_val + rov_size//2 * cos_val, 
+             center_y + rov_size//2 * cos_val + rov_size//2 * sin_val),  # Front left
+            (center_x - rov_size//2 * sin_val - rov_size//2 * cos_val, 
+             center_y + rov_size//2 * cos_val - rov_size//2 * sin_val),  # Rear left
+            (center_x + rov_size//2 * sin_val - rov_size//2 * cos_val, 
+             center_y - rov_size//2 * cos_val - rov_size//2 * sin_val),  # Rear right
         ]
         
-        # Draw the ROV body
-        pygame.draw.polygon(self.screen, self.colors['rov_body'], points)
-        pygame.draw.polygon(self.screen, self.colors['rov_highlight'], points, 2)
+        # Draw ROV body
+        pygame.draw.polygon(self.screen, self.colors['rov_body'], rotated_points)
+        pygame.draw.polygon(self.screen, self.colors['rov_highlight'], rotated_points, 2)
+        
+        # Draw front indicator (small triangle at front)
+        front_point = (
+            center_x + (rov_size//2 + 10) * sin_val, 
+            center_y - (rov_size//2 + 10) * cos_val
+        )
+        pygame.draw.circle(self.screen, (255, 255, 0), (int(front_point[0]), int(front_point[1])), 5)
+        
+        # Draw corner motors with power indicators
+        motor_positions = {
+            'front_right_motor': rotated_points[0],
+            'front_left_motor': rotated_points[1],
+            'rear_left_motor': rotated_points[2],
+            'rear_right_motor': rotated_points[3],
+        }
+        
+        for motor_name, pos in motor_positions.items():
+            motor_speed = self.motor_commands[motor_name]['speed']
+            motor_dir = self.motor_commands[motor_name]['direction']
+            
+            # Color based on direction and speed
+            if motor_speed == 0:
+                color = self.colors['motor_off']
+            elif motor_dir == 1:  # Forward
+                intensity = min(255, motor_speed)
+                color = (0, intensity, 0)  # Green for forward
+            else:  # Reverse
+                intensity = min(255, motor_speed)
+                color = (intensity, 0, 0)  # Red for reverse
+            
+            # Draw motor
+            motor_size = 5 + (motor_speed / 255) * 10
+            pygame.draw.circle(self.screen, color, (int(pos[0]), int(pos[1])), int(motor_size))
+            
+            # Draw motor label
+            label = self.small_font.render(f"{motor_speed}", True, self.colors['text'])
+            self.screen.blit(label, (int(pos[0]) - 10, int(pos[1]) - 20))
+        
+        # Draw vertical motor in center
+        vert_motor = self.motor_commands['vertical_motor']
+        vert_speed = vert_motor['speed']
+        vert_dir = vert_motor['direction']
+        
+        if vert_speed > 0:
+            if vert_dir == 1:  # Up
+                color = (0, 0, 255)  # Blue for up
+            else:  # Down
+                color = (255, 0, 255)  # Purple for down
+                
+            # Draw vertical motor indicator
+            vert_length = max(5, int(vert_speed / 255 * 30))
+            vert_rect = pygame.Rect(
+                center_x - 5,
+                center_y - vert_length if vert_dir == 1 else center_y,
+                10,
+                vert_length
+            )
+            pygame.draw.rect(self.screen, color, vert_rect)
         
         # Draw movement indicator (arrow showing direction)
         if abs(self.horizontal_movement[0]) > 0.1 or abs(self.horizontal_movement[1]) > 0.1:
@@ -448,7 +499,7 @@ class ROVClient:
             end_y = center_y - self.horizontal_movement[1] * arrow_scale
             
             # Draw the arrow line
-            pygame.draw.line(self.screen, (255, 0, 0), (center_x, center_y), (end_x, end_y), 2)
+            pygame.draw.line(self.screen, (255, 255, 0), (center_x, center_y), (end_x, end_y), 2)
             
             # Draw arrow head
             arrow_head_size = 8
@@ -460,64 +511,8 @@ class ROVClient:
             head2_x = end_x - arrow_head_size * math.cos(angle + math.pi/6)
             head2_y = end_y + arrow_head_size * math.sin(angle + math.pi/6)
             
-            pygame.draw.line(self.screen, (255, 0, 0), (end_x, end_y), (head1_x, head1_y), 2)
-            pygame.draw.line(self.screen, (255, 0, 0), (end_x, end_y), (head2_x, head2_y), 2)
-        
-        # Draw vertical movement indicator
-        if abs(self.vertical_movement) > 0.1:
-            vertical_indicator_x = rect.x + 40
-            vertical_indicator_y = rect.y + rect.height - 60
-            
-            # Label
-            vert_label = self.small_font.render("Vertical", True, self.colors['text'])
-            self.screen.blit(vert_label, (vertical_indicator_x, vertical_indicator_y - 20))
-            
-            # Bar background
-            bar_height = 100
-            bar_width = 20
-            pygame.draw.rect(self.screen, (50, 50, 50), 
-                            (vertical_indicator_x, vertical_indicator_y - bar_height//2, 
-                             bar_width, bar_height))
-            
-            # Active portion
-            active_height = int(self.vertical_movement * bar_height//2)
-            active_y = vertical_indicator_y if active_height < 0 else vertical_indicator_y - active_height
-            pygame.draw.rect(self.screen, (0, 0, 255) if active_height < 0 else (0, 255, 0), 
-                            (vertical_indicator_x, active_y, 
-                             bar_width, abs(active_height)))
-            
-            # Center line
-            pygame.draw.line(self.screen, (200, 200, 200), 
-                            (vertical_indicator_x, vertical_indicator_y), 
-                            (vertical_indicator_x + bar_width, vertical_indicator_y), 2)
-        
-        # Draw depth indicator if available
-        depth = self.telemetry.get('depth', 0)
-        depth_x = rect.x + rect.width - 70
-        depth_y = rect.y + rect.height - 60
-        
-        # Label
-        depth_label = self.small_font.render("Depth", True, self.colors['text'])
-        self.screen.blit(depth_label, (depth_x, depth_y - 20))
-        
-        # Bar background
-        bar_height = 100
-        bar_width = 20
-        pygame.draw.rect(self.screen, (50, 50, 50), 
-                        (depth_x, depth_y - bar_height, 
-                         bar_width, bar_height))
-        
-        # Active portion (map depth to pixel height)
-        max_depth = 10  # maximum depth in meters
-        depth_ratio = min(1.0, depth / max_depth)
-        active_height = int(depth_ratio * bar_height)
-        pygame.draw.rect(self.screen, (0, 200, 255), 
-                        (depth_x, depth_y - active_height, 
-                         bar_width, active_height))
-        
-        # Depth value
-        depth_value = self.small_font.render(f"{depth:.1f}m", True, self.colors['text'])
-        self.screen.blit(depth_value, (depth_x, depth_y + 10))
+            pygame.draw.line(self.screen, (255, 255, 0), (end_x, end_y), (head1_x, head1_y), 2)
+            pygame.draw.line(self.screen, (255, 255, 0), (end_x, end_y), (head2_x, head2_y), 2)
     
     def _draw_telemetry_panel(self, rect):
         """Draw the telemetry information panel"""
@@ -552,15 +547,17 @@ class ROVClient:
                 self.screen.blit(value_text, (rect.x + 100, y_pos))
                 y_pos += 30
         
-        # Draw motor values
+        # Draw motor values - updated for 5 motors
         y_pos = rect.y + 250
         title = self.info_font.render("Motor Commands:", True, self.colors['text'])
         self.screen.blit(title, (rect.x + 10, y_pos))
         y_pos += 30
         
         motor_items = [
-            ("Left", self.motor_commands['left_motor']['speed']),
-            ("Right", self.motor_commands['right_motor']['speed']),
+            ("Front Left", self.motor_commands['front_left_motor']['speed']),
+            ("Front Right", self.motor_commands['front_right_motor']['speed']),
+            ("Rear Left", self.motor_commands['rear_left_motor']['speed']),
+            ("Rear Right", self.motor_commands['rear_right_motor']['speed']),
             ("Vertical", self.motor_commands['vertical_motor']['speed'])
         ]
         
@@ -576,16 +573,16 @@ class ROVClient:
             self.screen.blit(label_text, (rect.x + 10, y_pos))
             
             # Bar background
-            pygame.draw.rect(self.screen, (50, 50, 50), (rect.x + 80, y_pos + 5, 100, 10))
+            pygame.draw.rect(self.screen, (50, 50, 50), (rect.x + 90, y_pos + 5, 80, 10))
             
             # Active portion
             pygame.draw.rect(self.screen, color, 
-                            (rect.x + 80, y_pos + 5, 
-                             int(normalized * 100), 10))
+                            (rect.x + 90, y_pos + 5, 
+                             int(normalized * 80), 10))
             
             # Value
             value_text = self.small_font.render(str(value), True, self.colors['text'])
-            self.screen.blit(value_text, (rect.x + 190, y_pos))
+            self.screen.blit(value_text, (rect.x + 180, y_pos))
             
             y_pos += 25
     
@@ -603,10 +600,10 @@ class ROVClient:
             joystick_name = self.info_font.render("No joystick connected", True, self.colors['warning'])
             self.screen.blit(joystick_name, (rect.x + 10, rect.y + 50))
         
-        # Draw control instructions
+        # Draw control instructions - updated for omnidirectional
         control_items = [
-            "Left Stick: Forward/Turn",
-            "Right Stick: Rotate",
+            "Left Stick: Omnidirectional Movement",
+            "Right Stick X: Rotate",
             "L2/R2 Triggers: Up/Down",
             "Triangle: Calibrate Controller",
             "Press ESC or close window to exit"
@@ -617,83 +614,6 @@ class ROVClient:
             text = self.info_font.render(item, True, self.colors['text'])
             self.screen.blit(text, (rect.x + 10, y_pos))
             y_pos += 25
-        
-        # Draw joystick position visualization
-        if self.joystick:
-            # Left stick visualization
-            stick_viz_x = rect.x + 350
-            stick_viz_y = rect.y + 100
-            self._draw_joystick_position(stick_viz_x, stick_viz_y, 
-                                       self.joystick.get_axis(0), 
-                                       self.joystick.get_axis(1), 
-                                       "Left Stick")
-            
-            # Right stick visualization
-            stick_viz_x = rect.x + 500
-            stick_viz_y = rect.y + 100
-            self._draw_joystick_position(stick_viz_x, stick_viz_y, 
-                                       self.joystick.get_axis(2), 
-                                       self.joystick.get_axis(3) if self.joystick.get_numaxes() > 3 else 0, 
-                                       "Right Stick")
-            
-            # Trigger visualization
-            if self.joystick.get_numaxes() > 4:
-                trigger_viz_x = rect.x + 650
-                trigger_viz_y = rect.y + 100
-                
-                l2_trigger = (self.joystick.get_axis(4) + 1) / 2
-                r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
-                
-                self._draw_trigger_position(trigger_viz_x, trigger_viz_y, l2_trigger, r2_trigger)
-    
-    def _draw_joystick_position(self, x, y, x_axis, y_axis, label):
-        """Draw a small visualization of a joystick position"""
-        # Label
-        label_text = self.small_font.render(label, True, self.colors['text'])
-        self.screen.blit(label_text, (x - 30, y - 50))
-        
-        # Outer circle
-        radius = 30
-        pygame.draw.circle(self.screen, self.colors['grid'], (x, y), radius, 1)
-        
-        # Cross hairs
-        pygame.draw.line(self.screen, self.colors['grid'], (x - radius, y), (x + radius, y), 1)
-        pygame.draw.line(self.screen, self.colors['grid'], (x, y - radius), (x, y + radius), 1)
-        
-        # Stick position
-        stick_x = x + int(x_axis * radius)
-        stick_y = y + int(y_axis * radius)
-        pygame.draw.circle(self.screen, self.colors['text'], (stick_x, stick_y), 5)
-        
-        # Values
-        x_text = self.small_font.render(f"X: {x_axis:.2f}", True, self.colors['text'])
-        y_text = self.small_font.render(f"Y: {y_axis:.2f}", True, self.colors['text'])
-        self.screen.blit(x_text, (x - 30, y + radius + 5))
-        self.screen.blit(y_text, (x - 30, y + radius + 25))
-    
-    def _draw_trigger_position(self, x, y, l2, r2):
-        """Draw a visualization of the trigger positions"""
-        # Label
-        label_text = self.small_font.render("Triggers", True, self.colors['text'])
-        self.screen.blit(label_text, (x - 30, y - 50))
-        
-        # L2 bar
-        bar_width = 60
-        bar_height = 20
-        pygame.draw.rect(self.screen, self.colors['grid'], (x - bar_width, y, bar_width, bar_height), 1)
-        pygame.draw.rect(self.screen, self.colors['rov_highlight'], 
-                        (x - int(l2 * bar_width), y, int(l2 * bar_width), bar_height))
-        
-        # R2 bar
-        pygame.draw.rect(self.screen, self.colors['grid'], (x, y, bar_width, bar_height), 1)
-        pygame.draw.rect(self.screen, self.colors['rov_highlight'], 
-                        (x, y, int(r2 * bar_width), bar_height))
-        
-        # Labels
-        l2_text = self.small_font.render(f"L2: {l2:.2f}", True, self.colors['text'])
-        r2_text = self.small_font.render(f"R2: {r2:.2f}", True, self.colors['text'])
-        self.screen.blit(l2_text, (x - bar_width, y + bar_height + 5))
-        self.screen.blit(r2_text, (x, y + bar_height + 5))
     
     def _draw_status_and_help(self):
         """Draw status information at the top of the screen"""
@@ -732,8 +652,10 @@ class ROVClient:
             try:
                 # Stop all motors before disconnecting
                 stop_commands = {
-                    'left_motor': {'direction': 0, 'speed': 0},
-                    'right_motor': {'direction': 0, 'speed': 0},
+                    'front_left_motor': {'direction': 0, 'speed': 0},
+                    'front_right_motor': {'direction': 0, 'speed': 0},
+                    'rear_left_motor': {'direction': 0, 'speed': 0},
+                    'rear_right_motor': {'direction': 0, 'speed': 0},
                     'vertical_motor': {'direction': 0, 'speed': 0}
                 }
                 
@@ -828,8 +750,8 @@ def main():
         print("4. Try running both programs as administrator")
     
     print("\nControls:")
-    print("  Left Stick: Forward/Turn")
-    print("  Right Stick: Rotate")
+    print("  Left Stick: Omnidirectional Movement")
+    print("  Right Stick X: Rotate")
     print("  L2/R2 Triggers: Up/Down")
     print("  Triangle (Y): Calibrate controller")
     print("  Close window or ESC to exit")
