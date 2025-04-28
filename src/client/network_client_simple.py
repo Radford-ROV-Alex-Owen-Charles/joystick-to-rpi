@@ -309,10 +309,6 @@ class ROVClient:
             r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
             self.vertical_movement = r2_trigger - l2_trigger
         
-        # Add this in your main loop or in read_joystick for debugging
-        for i in range(self.joystick.get_numaxes()):
-            print(f"Axis {i}: {self.joystick.get_axis(i):.3f}")
-        
         return True
     
     def send_motor_commands(self):
