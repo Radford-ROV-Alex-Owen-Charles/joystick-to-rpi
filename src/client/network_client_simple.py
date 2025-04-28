@@ -292,8 +292,15 @@ class ROVClient:
         self.horizontal_movement[0] = magnitude * math.sin(angle)
         self.horizontal_movement[1] = magnitude * math.cos(angle)
         
-        # Update rotation from right stick
-        self.rov_rotation += self.joystick.get_axis(2) * 2
+        # Update rotation from right stick - APPLY CALIBRATION OFFSET
+        rotation_value = self.joystick.get_axis(2) - self.omni_control.right_stick_x_offset
+
+        # Apply deadzone to rotation
+        if abs(rotation_value) < self.stick_dead_zone:
+            rotation_value = 0
+
+        # Update rotation
+        self.rov_rotation += rotation_value * 2
         self.rov_rotation %= 360
         
         # Get vertical movement
@@ -301,6 +308,10 @@ class ROVClient:
             l2_trigger = (self.joystick.get_axis(4) + 1) / 2
             r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
             self.vertical_movement = r2_trigger - l2_trigger
+        
+        # Add this in your main loop or in read_joystick for debugging
+        for i in range(self.joystick.get_numaxes()):
+            print(f"Axis {i}: {self.joystick.get_axis(i):.3f}")
         
         return True
     
