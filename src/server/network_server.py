@@ -39,26 +39,28 @@ class SimpleServer:
             else:
                 ports = glob.glob('/dev/tty[A-Za-z]*')
             
-            # Try each port
             for p in ports:
                 try:
+                    print(f"Trying port: {p}")  # Add this line
                     self.serial_port = serial.Serial(p, self.baud_rate, timeout=1)
-                    time.sleep(2)  # Give Arduino time to reset
+                    time.sleep(2)
                     print(f"Connected to Arduino on {p}")
                     return True
-                except:
+                except Exception as e:
+                    print(f"Failed to connect on {p}: {e}")  # Add this line
                     continue
-            
+        
             print("No Arduino found. Motor commands will be simulated.")
             return False
         else:
             try:
+                print(f"Trying specified port: {port}")  # Add this line
                 self.serial_port = serial.Serial(port, self.baud_rate, timeout=1)
-                time.sleep(2)  # Give Arduino time to reset
+                time.sleep(2)
                 print(f"Connected to Arduino on {port}")
                 return True
             except Exception as e:
-                print(f"Error connecting to Arduino: {e}")
+                print(f"Error connecting to Arduino on {port}: {e}")  # More detail
                 return False
     
     def send_to_arduino(self, motor_commands):
@@ -196,7 +198,7 @@ class SimpleServer:
                                     local_ips.insert(0, ip)
             except ImportError:
                 # Fall back to subnet scanning for direct connection IPs
-                for subnet in ["169.254", "192.168", "10.0", "172.16"]:
+                for subnet in ["169.254", "192.168", "10.0", "172.16", "127.0"]:
                     try:
                         # Use common direct connection subnets
                         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
