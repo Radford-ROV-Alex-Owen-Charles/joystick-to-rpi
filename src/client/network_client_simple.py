@@ -7,6 +7,9 @@ import struct
 import threading
 import math
 import subprocess
+import base64
+from io import BytesIO
+from PIL import Image, ImageTk
 from pygame.locals import *
 from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
 
@@ -196,6 +199,13 @@ class ROVClient:
             'timestamp': 0.0
         }
         
+        # Camera display
+        self.camera_frame = None
+        self.last_frame_time = 0
+        self.camera_fps = 0
+        self.frame_count = 0
+        self.fps_update_time = time.time()
+        
         # Initialize pygame
         pygame.init()
         pygame.joystick.init()
@@ -357,13 +367,32 @@ class ROVClient:
                 # Process the message
                 if len(data) == msg_len:
                     try:
-                        self.telemetry = json.loads(data.decode('utf-8'))
-                        # Print only occasionally to avoid spamming the console
-                        if time.time() % 5 < 0.1:  # Print roughly every 5 seconds
-                            print(f"Telemetry: {self.telemetry}")
+                        message = json.loads(data.decode('utf-8'))
+                        
+                        # Check message type
+                        if isinstance(message, dict) and 'type' in message:
+                            if message['type'] == 'camera_frame':
+                                # Process camera frame
+                                self.process_camera_frame(message['data'])
+                                
+                                # Update FPS counter
+                                self.frame_count += 1
+                                if time.time() - self.fps_update_time > 1.0:
+                                    self.camera_fps = self.frame_count / (time.time() - self.fps_update_time)
+                                    self.frame_count = 0
+                                    self.fps_update_time = time.time()
+                            else:
+                                # Unknown message type
+                                print(f"Unknown message type: {message['type']}")
+                        else:
+                            # Assume it's telemetry data (for backward compatibility)
+                            self.telemetry = message
+                            # Print only occasionally to avoid spamming the console
+                            if time.time() % 5 < 0.1:  # Print roughly every 5 seconds
+                                print(f"Telemetry: {self.telemetry}")
                     except json.JSONDecodeError:
                         print("Received invalid JSON data")
-                
+            
             except socket.timeout:
                 # Just a timeout, continue
                 pass
@@ -428,6 +457,9 @@ class ROVClient:
         
         # Draw connection status and help
         self._draw_status_and_help()
+        
+        # Draw camera feed
+        self._draw_camera_feed(main_view_rect)
         
         # Update the display
         pygame.display.flip()
@@ -678,6 +710,57 @@ class ROVClient:
             self.colors['success'] if self.connected else self.colors['warning'])
         self.screen.blit(server_info, (300, 15))
     
+    def _draw_camera_feed(self, rect):
+        """Draw the camera feed from the ROV"""
+        # Draw section title
+        title = self.title_font.render("Camera Feed", True, self.colors['text'])
+        self.screen.blit(title, (rect.x + 10, rect.y + 10))
+        
+        # Draw camera status
+        if self.camera_frame:
+            # Get time since last frame
+            time_since_frame = time.time() - self.last_frame_time
+            
+            # Show stale warning if frames are old
+            if time_since_frame > 2.0:
+                status = self.info_font.render(f"Feed Stale ({time_since_frame:.1f}s)", 
+                                              True, self.colors['warning'])
+            else:
+                status = self.info_font.render(f"Live ({self.camera_fps:.1f} FPS)", 
+                                              True, self.colors['success'])
+            
+            # Display the camera image
+            try:
+                # Resize image to fit in the rectangle
+                img_width = rect.width - 20
+                img_height = rect.height - 60
+                
+                # Convert PIL image to pygame surface
+                img = self.camera_frame.resize((img_width, img_height))
+                img_data = img.tobytes()
+                surface = pygame.image.fromstring(img_data, img.size, img.mode)
+                
+                # Display image
+                self.screen.blit(surface, (rect.x + 10, rect.y + 40))
+                
+            except Exception as e:
+                print(f"Error displaying camera image: {e}")
+                pygame.draw.rect(self.screen, (40, 40, 40), 
+                                (rect.x + 10, rect.y + 40, 
+                                 rect.width - 20, rect.height - 60))
+                err_text = self.info_font.render("Image Display Error", True, self.colors['warning'])
+                self.screen.blit(err_text, (rect.x + 50, rect.y + 100))
+        else:
+            # No camera feed available
+            pygame.draw.rect(self.screen, (40, 40, 40), 
+                            (rect.x + 10, rect.y + 40, 
+                             rect.width - 20, rect.height - 60))
+            status = self.info_font.render("No Camera Feed", True, self.colors['warning'])
+            self.screen.blit(status, (rect.x + 50, rect.y + 100))
+        
+        # Display status
+        self.screen.blit(status, (rect.x + 10, rect.y + rect.height - 30))
+    
     def calibrate_joystick(self):
         """Calibrate joystick to compensate for drift"""
         if not self.joystick:
@@ -727,6 +810,23 @@ class ROVClient:
                 pass
                 
         pygame.quit()
+    
+    def process_camera_frame(self, frame_data_b64):
+        """Process a camera frame received from the server"""
+        try:
+            # Decode base64 data
+            frame_data = base64.b64decode(frame_data_b64)
+            
+            # Convert to image
+            image = Image.open(BytesIO(frame_data))
+            
+            # Store as current camera frame
+            self.camera_frame = image
+            
+            # Update last frame time
+            self.last_frame_time = time.time()
+        except Exception as e:
+            print(f"Error processing camera frame: {e}")
 
 def main():
     # Allow command-line override but use discovery by default

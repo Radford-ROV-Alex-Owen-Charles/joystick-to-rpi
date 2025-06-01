@@ -7,6 +7,12 @@ import sys
 import serial
 import ipaddress
 from zeroconf import ServiceInfo, Zeroconf  # Add this import
+import io
+import picamera
+import base64
+from threading import Thread
+import numpy as np
+from PIL import Image
 
 class SimpleServer:
     def __init__(self, host='0.0.0.0', port=5000):
@@ -28,6 +34,11 @@ class SimpleServer:
         # Zeroconf service
         self.zeroconf = None
         self.service_info = None
+        
+        # Camera settings
+        self.camera = None
+        self.camera_running = False
+        self.camera_thread = None
     
     def connect_to_arduino(self, port=None):
         """Connect to Arduino over serial"""
@@ -374,6 +385,17 @@ class SimpleServer:
         """Stop the server"""
         self.running = False
         
+        # Stop camera
+        if hasattr(self, 'camera') and self.camera:
+            self.camera_running = False
+            if self.camera_thread:
+                self.camera_thread.join(timeout=1.0)
+            try:
+                self.camera.close()
+            except:
+                pass
+            self.camera = None
+    
         # Unregister Zeroconf service
         if self.zeroconf and self.service_info:
             try:
@@ -422,6 +444,94 @@ class SimpleServer:
         
         print("Server stopped")
 
+    def initialize_camera(self):
+        """Initialize the Raspberry Pi camera"""
+        try:
+            self.camera = picamera.PiCamera()
+            self.camera.resolution = (640, 480)
+            self.camera.framerate = 15
+            self.camera.rotation = 180  # Adjust as needed for your camera orientation
+            self.camera.brightness = 60
+            self.camera.contrast = 50
+            
+            # Allow camera to warm up
+            time.sleep(2)
+            
+            # Start the camera stream in a thread
+            self.camera_running = True
+            self.camera_thread = Thread(target=self.camera_loop)
+            self.camera_thread.daemon = True
+            self.camera_thread.start()
+            
+            print("Camera initialized successfully")
+            return True
+        except Exception as e:
+            print(f"Error initializing camera: {e}")
+            self.camera = None
+            return False
+
+    def camera_loop(self):
+        """Continuously capture frames from the camera"""
+        if not hasattr(self, 'camera') or not self.camera:
+            print("Camera not initialized")
+            return
+        
+        # Use io.BytesIO as an in-memory stream
+        stream = io.BytesIO()
+        
+        try:
+            for _ in self.camera.capture_continuous(stream, format='jpeg', 
+                                                   use_video_port=True, quality=20):
+                if not self.camera_running:
+                    break
+                    
+                # Get the frame data
+                stream.seek(0)
+                frame_data = stream.read()
+                
+                # Only send if a client is connected
+                if self.client_socket:
+                    try:
+                        self.send_camera_frame(frame_data)
+                    except:
+                        pass  # Ignore send errors
+                        
+                # Reset the stream for next frame
+                stream.seek(0)
+                stream.truncate()
+                
+                # Control frame rate - adjust as needed for performance
+                time.sleep(0.066)  # ~15 fps
+        except Exception as e:
+            print(f"Camera loop error: {e}")
+        finally:
+            stream.close()
+            print("Camera stream stopped")
+
+    def send_camera_frame(self, frame_data):
+        """Send a camera frame to the connected client"""
+        if not self.client_socket:
+            return
+            
+        try:
+            # Create message with camera frame
+            message = {
+                'type': 'camera_frame',
+                'data': base64.b64encode(frame_data).decode('utf-8'),
+                'timestamp': time.time()
+            }
+            
+            # Encode as JSON
+            json_data = json.dumps(message).encode('utf-8')
+            
+            # Add length header
+            header = struct.pack('!I', len(json_data))
+            
+            # Send message
+            self.client_socket.sendall(header + json_data)
+        except Exception as e:
+            print(f"Error sending camera frame: {e}")
+    
 def is_valid_ip(ip):
     try:
         ipaddress.ip_address(ip)
@@ -455,6 +565,9 @@ def main():
     
     # Connect to Arduino
     server.connect_to_arduino(arduino_port)
+    
+    # Initialize camera
+    server.initialize_camera()
     
     try:
         # Start the server
