@@ -6,13 +6,16 @@ import struct
 import sys
 import serial
 import ipaddress
-from zeroconf import ServiceInfo, Zeroconf  # Add this import
+from zeroconf import ServiceInfo, Zeroconf
 import io
-import picamera
 import base64
 from threading import Thread
 import numpy as np
 from PIL import Image
+
+# Replace picamera with picamera2
+from picamera2 import Picamera2
+from libcamera import controls
 
 class SimpleServer:
     def __init__(self, host='0.0.0.0', port=5000):
@@ -389,8 +392,9 @@ class SimpleServer:
         if hasattr(self, 'camera') and self.camera:
             self.camera_running = False
             if self.camera_thread:
-                self.camera_thread.join(timeout=1.0)
+                self.camera_thread.join(timeout=2.0)
             try:
+                self.camera.stop()
                 self.camera.close()
             except:
                 pass
@@ -445,75 +449,91 @@ class SimpleServer:
         print("Server stopped")
 
     def initialize_camera(self):
-        """Initialize the Raspberry Pi camera"""
+        """Initialize the Raspberry Pi camera using PiCamera2 with JPEG encoding"""
         try:
-            self.camera = picamera.PiCamera()
-            self.camera.resolution = (640, 480)
-            self.camera.framerate = 15
-            self.camera.rotation = 180  # Adjust as needed for your camera orientation
-            self.camera.brightness = 60
-            self.camera.contrast = 50
+            # Create Picamera2 instance
+            self.camera = Picamera2()
             
-            # Allow camera to warm up
+            # Configure camera for JPEG output
+            camera_config = self.camera.create_video_configuration(
+                main={"size": (640, 480), "format": "RGB888"},
+                encode="main"
+            )
+            self.camera.configure(camera_config)
+            
+            # Create JPEG encoder
+            from picamera2.encoders import JpegEncoder
+            from picamera2.outputs import FileOutput
+            
+            self.encoder = JpegEncoder(q=20)  # Quality 20 for smaller files
+            
+            # Set camera controls
+            self.camera.set_controls({
+                "Brightness": 0.1,
+                "Contrast": 1.1,
+                "ExposureTime": 20000,
+                "AnalogueGain": 1.0,
+            })
+            
+            # Start camera
+            self.camera.start()
             time.sleep(2)
             
             # Start the camera stream in a thread
             self.camera_running = True
-            self.camera_thread = Thread(target=self.camera_loop)
+            self.camera_thread = Thread(target=self.camera_loop_jpeg)
             self.camera_thread.daemon = True
             self.camera_thread.start()
             
-            print("Camera initialized successfully")
+            print("PiCamera2 with JPEG encoder initialized successfully")
             return True
         except Exception as e:
-            print(f"Error initializing camera: {e}")
+            print(f"Error initializing PiCamera2: {e}")
             self.camera = None
             return False
 
-    def camera_loop(self):
-        """Continuously capture frames from the camera"""
+    def camera_loop_jpeg(self):
+        """Continuously capture JPEG frames from the camera"""
         if not hasattr(self, 'camera') or not self.camera:
             print("Camera not initialized")
             return
         
-        # Use io.BytesIO as an in-memory stream
-        stream = io.BytesIO()
-        
         try:
-            for _ in self.camera.capture_continuous(stream, format='jpeg', 
-                                                   use_video_port=True, quality=20):
-                if not self.camera_running:
-                    break
+            while self.camera_running:
+                try:
+                    # Capture JPEG directly to memory
+                    stream = io.BytesIO()
+                    self.camera.capture_file(stream, format='jpeg')
+                    frame_data = stream.getvalue()
+                    stream.close()
                     
-                # Get the frame data
-                stream.seek(0)
-                frame_data = stream.read()
-                
-                # Only send if a client is connected
-                if self.client_socket:
-                    try:
-                        self.send_camera_frame(frame_data)
-                    except:
-                        pass  # Ignore send errors
+                    # Only send if a client is connected
+                    if self.client_socket:
+                        try:
+                            self.send_camera_frame(frame_data)
+                        except:
+                            pass  # Ignore send errors
                         
-                # Reset the stream for next frame
-                stream.seek(0)
-                stream.truncate()
+                except Exception as e:
+                    if self.camera_running:
+                        print(f"JPEG capture error: {e}")
+                    time.sleep(0.1)
                 
-                # Control frame rate - adjust as needed for performance
-                time.sleep(0.066)  # ~15 fps
         except Exception as e:
             print(f"Camera loop error: {e}")
         finally:
-            stream.close()
             print("Camera stream stopped")
 
-    def send_camera_frame(self, frame_data):
+    def send_camera_frame(self, frame):
         """Send a camera frame to the connected client"""
         if not self.client_socket:
             return
             
         try:
+            # Encode the image as JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            frame_data = buffer.tobytes()
+            
             # Create message with camera frame
             message = {
                 'type': 'camera_frame',
