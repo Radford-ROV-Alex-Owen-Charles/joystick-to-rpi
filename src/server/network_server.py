@@ -499,6 +499,9 @@ class SimpleServer:
             return
         
         try:
+            frame_count = 0
+            last_fps_time = time.time()
+            
             while self.camera_running:
                 try:
                     # Capture JPEG directly to memory
@@ -511,8 +514,18 @@ class SimpleServer:
                     if self.client_socket:
                         try:
                             self.send_camera_frame(frame_data)
-                        except:
-                            pass  # Ignore send errors
+                            frame_count += 1
+                            
+                            # Log FPS occasionally
+                            current_time = time.time()
+                            if current_time - last_fps_time > 5.0:  # Every 5 seconds
+                                fps = frame_count / (current_time - last_fps_time)
+                                print(f"Camera streaming at {fps:.1f} FPS")
+                                frame_count = 0
+                                last_fps_time = current_time
+                                
+                        except Exception as e:
+                            print(f"Error sending frame: {e}")
                         
                 except Exception as e:
                     if self.camera_running:
@@ -524,15 +537,14 @@ class SimpleServer:
         finally:
             print("Camera stream stopped")
 
-    def send_camera_frame(self, frame):
+    def send_camera_frame(self, frame_data):
         """Send a camera frame to the connected client"""
         if not self.client_socket:
             return
-            
+        
         try:
-            # Encode the image as JPEG
-            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            frame_data = buffer.tobytes()
+            # frame_data is already JPEG bytes from camera_loop_jpeg
+            # No need to re-encode with cv2
             
             # Create message with camera frame
             message = {
