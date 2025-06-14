@@ -1083,13 +1083,49 @@ def main():
                     if event.key == pygame.K_ESCAPE:
                         running = False
                         break
+                    # Handle keyboard input - KEY DOWN
+                    elif event.key == pygame.K_w:
+                        client.keys_pressed['w'] = True
+                    elif event.key == pygame.K_a:
+                        client.keys_pressed['a'] = True
+                    elif event.key == pygame.K_s:
+                        client.keys_pressed['s'] = True
+                    elif event.key == pygame.K_d:
+                        client.keys_pressed['d'] = True
+                    elif event.key == pygame.K_q:
+                        client.keys_pressed['q'] = True
+                    elif event.key == pygame.K_e:
+                        client.keys_pressed['e'] = True
+                    elif event.key == pygame.K_SPACE:
+                        client.keys_pressed['space'] = True
+                    elif event.key == pygame.K_LSHIFT or event.key == pygame.K_RSHIFT:
+                        client.keys_pressed['shift'] = True
+                elif event.type == pygame.KEYUP:
+                    # Handle keyboard release - KEY UP
+                    if event.key == pygame.K_w:
+                        client.keys_pressed['w'] = False
+                    elif event.key == pygame.K_a:
+                        client.keys_pressed['a'] = False
+                    elif event.key == pygame.K_s:
+                        client.keys_pressed['s'] = False
+                    elif event.key == pygame.K_d:
+                        client.keys_pressed['d'] = False
+                    elif event.key == pygame.K_q:
+                        client.keys_pressed['q'] = False
+                    elif event.key == pygame.K_e:
+                        client.keys_pressed['e'] = False
+                    elif event.key == pygame.K_SPACE:
+                        client.keys_pressed['space'] = False
+                    elif event.key == pygame.K_LSHIFT or event.key == pygame.K_RSHIFT:
+                        client.keys_pressed['shift'] = False
                 elif event.type == pygame.JOYBUTTONDOWN:
                     # Y button (Triangle on PS4) for calibration
                     if event.button == 3:  # Adjust for your controller
                         client.calibrate_joystick()
             
-            # Read joystick and update motor commands
-            client.read_joystick()
+            # THIS SECTION NEEDS TO BE INDENTED - IT'S PART OF THE WHILE LOOP!
+            # Read input (joystick or keyboard) and update motor commands
+            client.read_input()  # Changed from read_joystick()
             
             # Send commands to server periodically if connected
             current_time = time.time()
@@ -1101,7 +1137,7 @@ def main():
             client.render()
             
             # Limit frame rate
-            pygame.time.Clock().tick(60)
+            client.clock.tick(60)  # Use the clock from the client
             
     except KeyboardInterrupt:
         print("\nExiting client...")
