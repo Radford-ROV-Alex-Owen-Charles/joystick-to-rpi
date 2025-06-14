@@ -167,12 +167,21 @@ class ROVClient:
         self.server_port = server_port
         self.socket = None
         self.connected = False
+        self.use_ipv6 = self._is_ipv6_address(server_ip)
         
         # Joystick settings
         self.joystick = None
         self.stick_dead_zone = 0.1
         self.trigger_dead_zone = 0.1
         
+        # Keyboard state tracking
+        self.keys_pressed = {
+            'w': False, 'a': False, 's': False, 'd': False,  # Movement
+            'q': False, 'e': False,  # Rotation
+            'space': False, 'shift': False  # Vertical movement
+        }
+        self.keyboard_speed = 0.8  # Keyboard movement speed (0-1)
+    
         # Movement state
         self.rov_rotation = 0
         self.horizontal_movement = [0, 0]
@@ -226,8 +235,8 @@ class ROVClient:
     
     def initialize_visualization(self):
         """Initialize 2D visualization"""
-        # Set up display
-        self.screen_width, self.screen_height = 1000, 700
+        # Set up display - INCREASED SIZE
+        self.screen_width, self.screen_height = 1400, 900  # Was 1000, 700
         self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
         pygame.display.set_caption("ROV Control - 2D Visualization")
         self.clock = pygame.time.Clock()
@@ -238,16 +247,28 @@ class ROVClient:
         self.small_font = pygame.font.SysFont('Arial', 14)
     
     def connect_to_server(self):
-        """Connect to the ROV server"""
+        """Connect to the ROV server with IPv6 support"""
         try:
             print(f"Attempting to connect to {self.server_ip}:{self.server_port}...")
             
-            # Create socket with timeout
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10)  # Longer timeout for direct connections
+            # Create socket with IPv6 support if needed
+            if self.use_ipv6:
+                self.socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                # Handle zone identifier (the %19 part)
+                if '%' in self.server_ip:
+                    ip_part, zone_id = self.server_ip.split('%')
+                    # For IPv6 link-local, we need to specify the zone
+                    connect_address = (ip_part, self.server_port, 0, int(zone_id))
+                else:
+                    connect_address = (self.server_ip, self.server_port, 0, 0)
+            else:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                connect_address = (self.server_ip, self.server_port)
+            
+            self.socket.settimeout(10)
             
             # Try to connect
-            self.socket.connect((self.server_ip, self.server_port))
+            self.socket.connect(connect_address)
             self.connected = True
             print(f"Successfully connected to server at {self.server_ip}:{self.server_port}")
             
@@ -320,6 +341,97 @@ class ROVClient:
             self.vertical_movement = r2_trigger - l2_trigger
         
         return True
+    
+    def read_keyboard(self):
+        """Read keyboard inputs and convert to motor commands"""
+        # Calculate movement from keyboard
+        forward = 0
+        strafe = 0
+        rotation = 0
+        vertical = 0
+        
+        # Forward/backward movement
+        if self.keys_pressed['w']:
+            forward += self.keyboard_speed
+        if self.keys_pressed['s']:
+            forward -= self.keyboard_speed
+        
+        # Left/right strafe
+        if self.keys_pressed['a']:
+            strafe -= self.keyboard_speed
+        if self.keys_pressed['d']:
+            strafe += self.keyboard_speed
+        
+        # Rotation
+        if self.keys_pressed['q']:
+            rotation -= self.keyboard_speed
+        if self.keys_pressed['e']:
+            rotation += self.keyboard_speed
+        
+        # Vertical movement
+        if self.keys_pressed['space']:
+            vertical += self.keyboard_speed
+        if self.keys_pressed['shift']:
+            vertical -= self.keyboard_speed
+        
+        # Create a mock joystick input for the omni control system
+        # We'll temporarily set the motor commands directly
+        motor_commands = {
+            'front_left_motor': {'direction': 0, 'speed': 0},
+            'front_right_motor': {'direction': 0, 'speed': 0},
+            'rear_left_motor': {'direction': 0, 'speed': 0},
+            'rear_right_motor': {'direction': 0, 'speed': 0},
+            'vertical_motor': {'direction': 0, 'speed': 0}
+        }
+        
+        # Calculate motor values using the same logic as omnidirectional control
+        motor_outputs = {
+            'front_left': forward * 1 + strafe * (-1) + rotation * 1,
+            'front_right': forward * 1 + strafe * 1 + rotation * (-1),
+            'rear_left': forward * (-1) + strafe * (-1) + rotation * (-1),
+            'rear_right': forward * (-1) + strafe * 1 + rotation * 1,
+            'vertical': vertical
+        }
+        
+        # Normalize motor values if any exceed 1.0
+        max_value = max(abs(value) for value in motor_outputs.values())
+        if max_value > 1.0:
+            for motor in motor_outputs:
+                motor_outputs[motor] /= max_value
+        
+        # Convert to direction/speed format
+        motor_mapping = ['front_left', 'front_right', 'rear_left', 'rear_right']
+        for motor in motor_mapping:
+            output = motor_outputs[motor]
+            cmd_motor = f"{motor}_motor"
+            
+            # Motor direction: 1 for positive, 0 for negative
+            direction = 1 if output >= 0 else 0
+            # Motor speed: absolute value mapped to 0-255
+            speed = int(abs(output) * 255)
+            
+            motor_commands[cmd_motor] = {
+                'direction': direction,
+                'speed': speed
+            }
+        
+        # Handle vertical motor
+        vertical_output = motor_outputs['vertical']
+        motor_commands['vertical_motor'] = {
+            'direction': 1 if vertical_output >= 0 else 0,
+            'speed': int(abs(vertical_output) * 255)
+        }
+        
+        # Update visualization variables
+        self.horizontal_movement[0] = strafe
+        self.horizontal_movement[1] = forward
+        self.vertical_movement = vertical
+        
+        # Update rotation
+        self.rov_rotation += rotation * 3  # Adjust rotation speed
+        self.rov_rotation %= 360
+        
+        return motor_commands
     
     def send_motor_commands(self):
         """Send motor commands to the server"""
@@ -400,6 +512,41 @@ class ROVClient:
                 print(f"Error receiving data: {e}")
                 self.connected = False
                 break
+
+    def read_input(self):
+        """Read inputs from joystick or keyboard and convert to motor commands"""
+        if self.joystick:
+            # Use joystick if available
+            self.motor_commands = self.omni_control.process_input(self.joystick, self.rov_rotation)
+            
+            # Update visualization variables from joystick
+            pygame.event.pump()
+            forward = -self.joystick.get_axis(1)
+            strafe = self.joystick.get_axis(0)
+            
+            magnitude = min(1.0, math.sqrt(forward**2 + strafe**2))
+            angle = math.atan2(strafe, forward)
+            
+            self.horizontal_movement[0] = magnitude * math.sin(angle)
+            self.horizontal_movement[1] = magnitude * math.cos(angle)
+            
+            # Update rotation from right stick
+            rotation_value = self.joystick.get_axis(2) - self.omni_control.right_stick_x_offset
+            if abs(rotation_value) < self.stick_dead_zone:
+                rotation_value = 0
+            self.rov_rotation += rotation_value * 2
+            self.rov_rotation %= 360
+            
+            # Get vertical movement
+            if self.joystick.get_numaxes() > 4:
+                l2_trigger = (self.joystick.get_axis(4) + 1) / 2
+                r2_trigger = (self.joystick.get_axis(5) + 1) / 2 if self.joystick.get_numaxes() > 5 else 0
+                self.vertical_movement = r2_trigger - l2_trigger
+        else:
+            # Use keyboard if no joystick
+            self.motor_commands = self.read_keyboard()
+        
+        return True
     
     def discover_server_zeroconf(self):
         """Discover ROV server using Zeroconf"""
@@ -432,34 +579,28 @@ class ROVClient:
             return None, None
     
     def render(self):
-        """Render the 2D visualization"""
+        """Render the 2D visualization with larger camera view"""
         # Fill background
         self.screen.fill(self.colors['background'])
         
-        # Draw main sections
-        main_view_rect = pygame.Rect(200, 50, 550, 400)
-        telemetry_rect = pygame.Rect(770, 50, 200, 400)
-        control_rect = pygame.Rect(200, 470, 770, 200)
+        # Larger layout with more space
+        main_view_rect = pygame.Rect(20, 50, 400, 350)          # Bigger ROV view
+        camera_rect = pygame.Rect(440, 50, 940, 600)            # Much larger camera feed
+        telemetry_rect = pygame.Rect(20, 420, 400, 450)         # Taller telemetry
+        control_rect = pygame.Rect(440, 670, 940, 200)          # Wider controls
         
         # Draw borders for sections
         pygame.draw.rect(self.screen, self.colors['grid'], main_view_rect, 2)
+        pygame.draw.rect(self.screen, self.colors['grid'], camera_rect, 2)
         pygame.draw.rect(self.screen, self.colors['grid'], telemetry_rect, 2)
         pygame.draw.rect(self.screen, self.colors['grid'], control_rect, 2)
         
-        # Draw ROV visualization
+        # Draw sections
         self._draw_rov_visualization(main_view_rect)
-        
-        # Draw telemetry panel
+        self._draw_camera_feed(camera_rect)
         self._draw_telemetry_panel(telemetry_rect)
-        
-        # Draw control panel
         self._draw_control_panel(control_rect)
-        
-        # Draw connection status and help
         self._draw_status_and_help()
-        
-        # Draw camera feed
-        self._draw_camera_feed(main_view_rect)
         
         # Update the display
         pygame.display.flip()
@@ -678,18 +819,28 @@ class ROVClient:
         if self.joystick:
             joystick_name = self.info_font.render(f"Joystick: {self.joystick.get_name()}", True, self.colors['text'])
             self.screen.blit(joystick_name, (rect.x + 10, rect.y + 50))
+            
+            # Joystick controls
+            control_items = [
+                "Left Stick: Omnidirectional Movement",
+                "Right Stick X: Rotate",
+                "L2/R2 Triggers: Up/Down",
+                "Triangle: Calibrate Controller",
+            ]
         else:
-            joystick_name = self.info_font.render("No joystick connected", True, self.colors['warning'])
+            joystick_name = self.info_font.render("Using Keyboard Controls", True, self.colors['success'])
             self.screen.blit(joystick_name, (rect.x + 10, rect.y + 50))
+            
+            # Keyboard controls
+            control_items = [
+                "WASD: Move Forward/Back/Left/Right",
+                "Q/E: Rotate Left/Right", 
+                "Space/Shift: Up/Down",
+                "ESC: Exit",
+            ]
         
-        # Draw control instructions - updated for omnidirectional
-        control_items = [
-            "Left Stick: Omnidirectional Movement",
-            "Right Stick X: Rotate",
-            "L2/R2 Triggers: Up/Down",
-            "Triangle: Calibrate Controller",
-            "Press ESC or close window to exit"
-        ]
+        # Common controls
+        control_items.append("Press ESC or close window to exit")
         
         y_pos = rect.y + 80
         for item in control_items:
@@ -828,6 +979,10 @@ class ROVClient:
         except Exception as e:
             print(f"Error processing camera frame: {e}")
 
+    def _is_ipv6_address(self, ip):
+        """Check if the IP address is IPv6"""
+        return ':' in ip and not ip.startswith('192.168') and not ip.startswith('10.')
+
 def main():
     # Allow command-line override but use discovery by default
     use_discovery = True
@@ -854,12 +1009,13 @@ def main():
     # Initialize visualization
     client.initialize_visualization()
     
-    # Show direct connection instructions
-    print("\nDirect Connection Tips:")
-    print("1. Make sure both computers are on the same subnet (192.168.1.x)")
-    print("2. Disable firewalls or add exceptions for this application")
-    print("3. Try using command line: python network_client_2d.py 192.168.1.x 5000")
-    print("4. For direct Ethernet connections, check link-local addressing (169.254.x.x)\n")
+    # Show connection instructions including IPv6
+    print("\nConnection Tips:")
+    print("1. IPv4: Make sure both computers are on the same subnet (192.168.1.x)")
+    print("2. IPv6: Use link-local addresses like fe80::xxxx:xxxx:xxxx:xxxx%interface")
+    print("3. Find interface number with 'ipconfig' (Windows) or 'ip addr' (Linux)")
+    print("4. Disable firewalls or add exceptions for this application")
+    print("5. Try using command line: python network_client_simple.py fe80::xxxx:xxxx:xxxx:xxxx%19 5000")
     
     # Auto-discover server if requested
     if use_discovery:
@@ -868,25 +1024,16 @@ def main():
             server_ip = discovered_ip
             server_port = discovered_port
         else:
-            # Discovery failed - try common direct-connected IP ranges
-            print("Trying common direct-connect IP addresses...")
-            for test_ip in ["192.168.2.2", "192.168.1.2", "10.42.0.2", "169.254.0.2", "192.168.0.201"]:
-                print(f"Testing {test_ip}...")
-                try:
-                    test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    test_socket.settimeout(1)
-                    test_socket.connect((test_ip, server_port))
-                    test_socket.close()
-                    print(f"Connection successful to {test_ip}")
-                    server_ip = test_ip
-                    break
-                except:
-                    pass
+            print("Automatic discovery failed.")
+            print("\nTo find your Pi's IPv6 address:")
+            print("1. On Pi: run 'ip addr show' and look for 'inet6 fe80:' addresses")
+            print("2. On Windows: run 'ipconfig' to find your interface number")
+            print("3. Use format: fe80::xxxx:xxxx:xxxx:xxxx%interface_number")
     
-    # Connect to server (fallback to default if not discovered)
+    # Connect to server (fallback to user input if not discovered)
     if server_ip is None:
-        # Ask user for IP address
         print("\nAutomatic discovery failed. Please enter the server's IP address:")
+        print("(For IPv6 link-local, use format: fe80::xxxx:xxxx:xxxx:xxxx%interface_number)")
         user_ip = input("> ").strip()
         if user_ip:
             server_ip = user_ip
@@ -899,17 +1046,25 @@ def main():
     success = client.connect_to_server()
     
     if not success:
-        print("\nConnection failed! Please check:")
-        print("1. Is the server running on the other machine?")
-        print("2. Is the correct IP address being used?")
-        print("3. Are there any firewalls blocking the connection?")
+        print("\nConnection failed! For IPv6 connections, please check:")
+        print("1. Is the server running on the Pi?")
+        print("2. Is the IPv6 address correct with proper zone identifier (%number)?")
+        print("3. Are both devices on the same network segment?")
         print("4. Try running both programs as administrator")
+        print("5. Check firewall settings on both machines")
     
     print("\nControls:")
-    print("  Left Stick: Omnidirectional Movement")
-    print("  Right Stick X: Rotate")
-    print("  L2/R2 Triggers: Up/Down")
-    print("  Triangle (Y): Calibrate controller")
+    if client.joystick:
+        print("  Joystick Controls:")
+        print("    Left Stick: Omnidirectional Movement")
+        print("    Right Stick X: Rotate")
+        print("    L2/R2 Triggers: Up/Down")
+        print("    Triangle (Y): Calibrate controller")
+    else:
+        print("  Keyboard Controls:")
+        print("    WASD: Move Forward/Back/Left/Right")
+        print("    Q/E: Rotate Left/Right")
+        print("    Space/Shift: Up/Down")
     print("  Close window or ESC to exit")
     
     # Main loop

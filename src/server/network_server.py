@@ -18,11 +18,13 @@ from picamera2 import Picamera2
 from libcamera import controls
 
 class SimpleServer:
-    def __init__(self, host='0.0.0.0', port=5000):
+    def __init__(self, host='0.0.0.0', port=5000, ipv6=True):
         # Network settings
         self.host = host
         self.port = port
+        self.ipv6_enabled = ipv6
         self.server_socket = None
+        self.server_socket_v6 = None  # Add IPv6 socket
         self.client_socket = None
         self.running = False
         
@@ -116,7 +118,7 @@ class SimpleServer:
             print(f"Error sending to Arduino: {e}")
     
     def register_zeroconf_service(self):
-        """Register this server as a Zeroconf service for auto-discovery"""
+        """Register this server as a Zeroconf service for auto-discovery with IPv6 support"""
         try:
             # Get the best IP address for client connections
             local_ip = self._get_best_local_ip()
@@ -124,16 +126,16 @@ class SimpleServer:
                 print("Warning: Could not determine local IP for Zeroconf")
                 return False
             
-            print(f"Registering with IP: {local_ip}")
+            print(f"Registering with primary IP: {local_ip}")
 
             # Get all local IPs for debugging
             all_ips = self._get_local_ips()
             print(f"All available IPs: {all_ips}")
             
-            # Prepare service info with ALL addresses to improve discovery odds
+            # Prepare service info with IPv4 addresses (Zeroconf typically uses IPv4)
             addresses = []
             for ip in all_ips:
-                if ip != '127.0.0.1':
+                if ':' not in ip and ip != '127.0.0.1':  # IPv4 only for Zeroconf
                     try:
                         addresses.append(socket.inet_aton(ip))
                     except:
@@ -147,11 +149,12 @@ class SimpleServer:
             self.service_info = ServiceInfo(
                 "_rovcontrol._tcp.local.",
                 service_name,
-                addresses=addresses,  # Use all addresses
+                addresses=addresses,
                 port=self.port,
                 properties={
                     "version": "1.0",
-                    "name": "ROV Control"
+                    "name": "ROV Control",
+                    "ipv6_supported": "true" if self.ipv6_enabled else "false"
                 },
                 server=f"rovserver-{socket.gethostname().replace('.', '-')}.local."
             )
@@ -166,98 +169,142 @@ class SimpleServer:
             print(f"Error registering Zeroconf service: {e}")
             return False
     
-    def _get_best_local_ip(self):
-        """Get the best IP address for client connections"""
+    def _get_local_ips(self):
+        """Get all local IP addresses including IPv6 link-local addresses"""
+        local_ips = []
+        local_ipv6 = []
+        
         try:
+            # Get all network interfaces for both IPv4 and IPv6
+            hostname = socket.gethostname()
+            
+            # Get IPv4 addresses
+            try:
+                ipv4_addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
+                for addr in ipv4_addrs:
+                    ip = addr[4][0]
+                    if ip != '127.0.0.1':
+                        local_ips.append(ip)
+            except:
+                pass
+            
+            # Get IPv6 addresses
+            try:
+                ipv6_addrs = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+                for addr in ipv6_addrs:
+                    ip = addr[4][0]
+                    # Skip loopback and extract scope ID if present
+                    if ip != '::1' and not ip.startswith('::1'):
+                        # Handle zone ID (scope) for link-local addresses
+                        if '%' in ip:
+                            local_ipv6.append(ip)
+                        else:
+                            local_ipv6.append(ip)
+            except:
+                pass
+            
+            # Try to get more complete interface information
+            try:
+                import netifaces
+                for interface in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface)
+                    
+                    # IPv4 addresses
+                    if netifaces.AF_INET in addrs:
+                        for addr in addrs[netifaces.AF_INET]:
+                            ip = addr['addr']
+                            if ip != '127.0.0.1' and ip not in local_ips:
+                                local_ips.append(ip)
+                    
+                    # IPv6 addresses
+                    if netifaces.AF_INET6 in addrs:
+                        for addr in addrs[netifaces.AF_INET6]:
+                            ip = addr['addr']
+                            if ip != '::1' and ip not in local_ipv6:
+                                # Add interface name for link-local addresses
+                                if ip.startswith('fe80::'):
+                                    ip_with_scope = f"{ip}%{interface}"
+                                    local_ipv6.append(ip_with_scope)
+                                else:
+                                    local_ipv6.append(ip)
+            except ImportError:
+                print("netifaces not available, limited IPv6 discovery")
+        
+        except Exception as e:
+            print(f"Error getting local IPs: {e}")
+        
+        # Combine IPv4 and IPv6 addresses
+        all_ips = local_ips + local_ipv6
+        return list(set(all_ips))
+    
+    def _get_best_local_ip(self):
+        """Get the best IP address for client connections (IPv4 preferred)"""
+        try:
+            # Try IPv4 first
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # We don't actually connect to Google DNS
             s.connect(('8.8.8.8', 1))
             ip = s.getsockname()[0]
             s.close()
             return ip
         except:
-            # Get all local IPs and use first non-loopback
+            # Fall back to first available non-loopback IP
             ips = self._get_local_ips()
             for ip in ips:
-                if ip != '127.0.0.1':
+                if ip != '127.0.0.1' and ip != '::1':
                     return ip
             return '127.0.0.1'
     
-    def _get_local_ips(self):
-        """Get all local IP addresses including direct connection interfaces"""
-        local_ips = []
-        try:
-            # Get all network interfaces
-            interfaces = socket.getaddrinfo(socket.gethostname(), None)
-            for interface in interfaces:
-                ip = interface[4][0]
-                # Don't add loopback addresses
-                if ip != '127.0.0.1' and not ip.startswith('::'):
-                    local_ips.append(ip)
-                    
-            # For direct connections, also look for link-local addresses (169.254.x.x)
-            try:
-                import netifaces
-                for interface in netifaces.interfaces():
-                    addrs = netifaces.ifaddresses(interface)
-                    if netifaces.AF_INET in addrs:
-                        for addr in addrs[netifaces.AF_INET]:
-                            ip = addr['addr']
-                            if ip != '127.0.0.1':
-                                local_ips.append(ip)
-                                # If this is a direct connection (likely 169.254.x.x), prioritize it
-                                if ip.startswith('169.254'):
-                                    print(f"Found likely direct connection IP: {ip}")
-                                    # Put it at the beginning of the list
-                                    local_ips.insert(0, ip)
-            except ImportError:
-                # Fall back to subnet scanning for direct connection IPs
-                for subnet in ["169.254", "192.168", "10.0", "172.16", "127.0"]:
-                    try:
-                        # Use common direct connection subnets
-                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        s.bind((f"{subnet}.1.1", 0))
-                        s.close()
-                        local_ips.append(f"{subnet}.1.1")
-                    except:
-                        pass
-        except:
-            pass
-            
-        # Remove duplicates
-        return list(set(local_ips))
-    
     def start(self):
-        """Start the server"""
+        """Start the server with dual-stack support"""
         try:
-            # Create server socket
+            # Create IPv4 server socket
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Allow quick reuse of the port - important for testing/restarting
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Increase socket timeouts to handle slower connections
             self.server_socket.settimeout(10)
             
-            # Always bind to all interfaces - required for direct connections
-            self.host = '0.0.0.0'
-            print(f"Binding to all interfaces ({self.host}:{self.port})")
+            # Create IPv6 server socket if enabled
+            if self.ipv6_enabled:
+                try:
+                    self.server_socket_v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    self.server_socket_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    # Disable IPv4-mapped IPv6 addresses to avoid conflicts
+                    self.server_socket_v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    self.server_socket_v6.settimeout(10)
+                    print("IPv6 socket created successfully")
+                except Exception as e:
+                    print(f"IPv6 socket creation failed: {e}")
+                    self.server_socket_v6 = None
+                    self.ipv6_enabled = False
             
+            # Bind IPv4 socket
             try:
-                self.server_socket.bind((self.host, self.port))
+                self.server_socket.bind(('0.0.0.0', self.port))
+                self.server_socket.listen(1)
+                print(f"IPv4 server listening on 0.0.0.0:{self.port}")
             except socket.error as e:
-                print(f"Failed to bind: {e}")
+                print(f"Failed to bind IPv4 socket: {e}")
                 raise
-                    
-            self.server_socket.listen(1)
+            
+            # Bind IPv6 socket
+            if self.server_socket_v6:
+                try:
+                    self.server_socket_v6.bind(('::', self.port))
+                    self.server_socket_v6.listen(1)
+                    print(f"IPv6 server listening on [::]:{self.port}")
+                except socket.error as e:
+                    print(f"Failed to bind IPv6 socket: {e}")
+                    self.server_socket_v6.close()
+                    self.server_socket_v6 = None
+                    self.ipv6_enabled = False
             
             # Get local IP addresses to help user connect
             local_ips = self._get_local_ips()
-            print(f"Server listening on {self.host}:{self.port}")
             print(f"Local IP addresses for client connection:")
             for ip in local_ips:
-                print(f"  {ip}")
+                if ':' in ip:
+                    print(f"  [IPv6] {ip}")
+                else:
+                    print(f"  [IPv4] {ip}")
                 
             self.running = True
             
@@ -269,23 +316,39 @@ class SimpleServer:
             watchdog_thread.daemon = True
             watchdog_thread.start()
             
-            # Main accept loop
+            # Main accept loop with dual-stack support
             while self.running:
                 try:
                     print("Waiting for client connection...")
-                    self.server_socket.settimeout(None)  # No timeout during accept
-                    self.client_socket, addr = self.server_socket.accept()
-                    print(f"Client connected from {addr}")
                     
-                    # Set a reasonable timeout for client operations
-                    self.client_socket.settimeout(5)
+                    # Use select to handle both IPv4 and IPv6 sockets
+                    import select
                     
-                    # Handle this client
-                    self.handle_client()
+                    sockets_to_check = [self.server_socket]
+                    if self.server_socket_v6:
+                        sockets_to_check.append(self.server_socket_v6)
+                    
+                    # Wait for incoming connections on either socket
+                    ready_sockets, _, _ = select.select(sockets_to_check, [], [], 1.0)
+                    
+                    for sock in ready_sockets:
+                        self.client_socket, addr = sock.accept()
+                        if sock == self.server_socket_v6:
+                            print(f"IPv6 client connected from [{addr[0]}]:{addr[1]}")
+                        else:
+                            print(f"IPv4 client connected from {addr[0]}:{addr[1]}")
+                        
+                        # Set timeout for client operations
+                        self.client_socket.settimeout(5)
+                        
+                        # Handle this client
+                        self.handle_client()
+                        break
                     
                 except Exception as e:
-                    print(f"Error in connection handling: {e}")
-                    time.sleep(1)
+                    if self.running:
+                        print(f"Error in connection handling: {e}")
+                        time.sleep(1)
             
         except Exception as e:
             print(f"Server error: {e}")
@@ -419,13 +482,21 @@ class SimpleServer:
                 pass
             self.client_socket = None
         
-        # Close server socket
+        # Close IPv4 server socket
         if self.server_socket:
             try:
                 self.server_socket.close()
             except:
                 pass
             self.server_socket = None
+        
+        # Close IPv6 server socket
+        if self.server_socket_v6:
+            try:
+                self.server_socket_v6.close()
+            except:
+                pass
+            self.server_socket_v6 = None
         
         # Close Arduino connection
         if self.serial_port:
@@ -585,15 +656,17 @@ def get_local_ip():
 
 def main():
     # Get command line arguments
-    host = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'
+    host = sys.argv[1] if len(sys.argv) > 1 else '0.0.0.0'
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
     arduino_port = sys.argv[3] if len(sys.argv) > 3 else None
+    enable_ipv6 = sys.argv[4].lower() == 'true' if len(sys.argv) > 4 else True
     
     print("====== ROV Server ======")
     print(f"Starting server on {host}:{port}")
+    print(f"IPv6 support: {'Enabled' if enable_ipv6 else 'Disabled'}")
     
-    # Create server instance
-    server = SimpleServer(host, port)
+    # Create server instance with IPv6 support
+    server = SimpleServer(host, port, ipv6=enable_ipv6)
     
     # Connect to Arduino
     server.connect_to_arduino(arduino_port)
